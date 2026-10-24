@@ -13,8 +13,11 @@ from fastapi import FastAPI
 
 from app.core.config import Settings, get_settings
 from app.core.database import create_db_and_tables, make_engine, make_session_factory
+from app.core.downloader import YtDlpDownloader
+from app.core.storage import B2Storage
 from app.middlewares.auth import RollingCodeMiddleware
 from app.modules.auth.services import AuthService
+from app.modules.downloads.services import DownloadService
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -23,6 +26,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
     auth = AuthService(session_factory, grace_seconds=settings.code_grace_seconds)
+    storage = B2Storage(
+        endpoint_url=settings.b2_endpoint_url,
+        key_id=settings.b2_key_id,
+        application_key=settings.b2_application_key.get_secret_value(),
+        bucket=settings.b2_bucket,
+        presign_expiry=settings.b2_presign_expiry,
+    )
+    downloads = DownloadService(
+        session_factory=session_factory,
+        downloader=YtDlpDownloader(cookies_file=settings.cookies_file),
+        storage=storage,
+        tmp_dir=settings.tmp_dir,
+        upload_retries=settings.upload_retries,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -36,6 +53,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.session_factory = session_factory
     app.state.auth = auth
+    app.state.downloads = downloads
 
     app.add_middleware(RollingCodeMiddleware, auth=auth)
 
@@ -43,6 +61,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health() -> dict:
         return {"status": "ok"}
 
-    # TODO (Stage 3/4): build B2Storage + DownloadService here and include api.v1.router.
+    # TODO (Stage 4): include api.v1.router (routes use app.state.downloads).
 
     return app

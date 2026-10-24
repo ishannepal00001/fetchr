@@ -2,7 +2,7 @@
 
 A small self-hosted media downloader API. A client sends a URL (mostly Facebook in v1). fetchr downloads it with **yt-dlp**, uploads it to **Backblaze B2**, checks that the upload arrived intact, and records it in a **SQLite** database. Every request is authenticated with a **rolling one-time code**.
 
-> Status: **Stage 0**. Folder structure only. Every file holds comments describing what it will contain. See [Roadmap](#roadmap).
+> Status: **Stage 4 in progress**. Core, auth, B2 storage, the yt-dlp downloader and the download service are built and tested; the v1 HTTP routes are next. See [Roadmap](#roadmap).
 
 ---
 
@@ -36,7 +36,7 @@ Because the rotation is a single atomic statement, two requests with the same co
 1. yt-dlp downloads into `tmp/<id>/`, using a cookies file for Facebook if one is configured.
 2. The local file's sha256 and size are computed.
 3. The file is uploaded to B2 at `downloads/<client_id>/<id>/<filename>`, with the sha256 stored in object metadata.
-4. **Verify**: `head_object` must report the same size and sha256.
+4. **Verify**: `head_object` must report the same size and sha256 metadata (the bytes aren't re-downloaded).
 5. **Only after verification passes** is the row marked `completed` and `tmp/<id>/` deleted.
 6. If verification keeps failing (after `FETCHR_UPLOAD_RETRIES` attempts), the B2 object is removed, the row is marked `failed`, and the **temp file is kept** so the video isn't lost.
 
@@ -112,10 +112,10 @@ scripts/start.sh              # production / Render start command: 0.0.0.0:$PORT
 
 ## Roadmap
 0. **Structure**: folders and comment-only files *(done)*
-1. **Core**: config, database, app factory, `/health`
-2. **Auth**: `ClientCredential`, `RollingCodeMiddleware`, rotation + grace window, with tests
-3. **Storage**: B2 upload / verify / presign / delete (tested with moto)
-4. **Downloads**: `Download` model, `process_download` pipeline, v1 schemas + routes
-5. **Deploy**: Alembic migrations, systemd + uvicorn (1 worker, because of SQLite), nginx, B2 lifecycle rules, rate limiting
+1. **Core**: config, database, app factory, `/health` *(done)*
+2. **Auth**: `ClientCredential`, `RollingCodeMiddleware`, rotation + grace window, with tests *(done)*
+3. **Storage**: B2 upload / verify / presign / delete (tested with moto) *(done)*
+4. **Downloads**: `Download` model, `process_download` pipeline, yt-dlp downloader *(done)*; v1 schemas + routes *(next)*
+5. **Deploy**: Render (Dockerfile with ffmpeg, `scripts/start.sh`, 1 worker because of SQLite), rate limiting
 
 Later: live progress streaming (SSE).

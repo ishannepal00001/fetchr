@@ -50,3 +50,12 @@ def test_restart_keeps_rotated_code(settings):
     with TestClient(create_app(settings)) as client:
         assert client.get("/x", headers={"X-Client-Id": "my-client", "X-Fetchr-Code": "seed"}).status_code == 401
         assert client.get("/x", headers={"X-Client-Id": "my-client", "X-Fetchr-Code": next_code}).status_code == 404
+
+
+def test_download_service_is_wired_with_b2_settings(settings):
+    from app.modules.downloads.services import DownloadService
+
+    app = create_app(settings)
+
+    assert isinstance(app.state.downloads, DownloadService)
+    assert app.state.downloads._storage.bucket == "bucket"
