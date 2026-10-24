@@ -51,6 +51,7 @@ app/
 │   ├── config.py            settings from env / .env
 │   ├── database.py          SQLite engine (WAL), sessions
 │   ├── security.py          generate / hash / compare codes
+│   ├── downloader.py        yt-dlp wrapper (implements the downloads Downloader protocol)
 │   └── storage.py           Backblaze B2: upload, verify, presigned URL, delete
 ├── middlewares/
 │   └── auth.py              RollingCodeMiddleware → modules/auth/services
@@ -96,6 +97,8 @@ Copy `.env.example` to `.env` and fill it in. Key values:
 - `FETCHR_COOKIES_FILE`: optional, for Facebook videos that need login.
 
 ## Running (from Stage 1)
+Requires **ffmpeg** on the PATH: Facebook usually serves video and audio as separate streams, and yt-dlp uses ffmpeg to merge them.
+
 ```bash
 uv sync                       # or: pip install -e .
 cp .env.example .env
