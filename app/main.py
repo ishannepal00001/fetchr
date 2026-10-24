@@ -47,6 +47,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings.tmp_dir.mkdir(parents=True, exist_ok=True)
         create_db_and_tables(engine)  # Alembic is skipped: on Render the DB is recreated each start
         auth.seed_client(settings.client_id, settings.seed_code.get_secret_value())
+        downloads.fail_interrupted()  # work in flight when the last process died can't resume
         yield
         engine.dispose()
 

@@ -110,6 +110,30 @@ class DownloadService:
             raise DownloadNotReady(download_id)
         return self._storage.presigned_url(download.b2_key)
 
+    def fail_interrupted(self) -> int:
+        """
+        Call once at startup, before any work is accepted. Background work dies with the
+        process, so anything not completed/failed was interrupted (redeploy, crash, Render
+        spin-down) and would otherwise sit in its status forever. Returns how many rows
+        were marked failed. Their tmp/<id>/ files are left alone, like a failed upload.
+        """
+        unfinished = [
+            DownloadStatus.QUEUED,
+            DownloadStatus.DOWNLOADING,
+            DownloadStatus.UPLOADING,
+            DownloadStatus.VERIFYING,
+        ]
+        with self._session_factory() as session:
+            rows = session.exec(select(Download).where(col(Download.status).in_(unfinished))).all()
+            for download in rows:
+                _update(
+                    session,
+                    download,
+                    status=DownloadStatus.FAILED,
+                    error=f"interrupted by a server restart while {download.status.value}; submit it again",
+                )
+        return len(rows)
+
     def process_download(self, download_id: uuid.UUID) -> None:
         """
         queued -> downloading -> uploading -> verifying -> completed | failed.

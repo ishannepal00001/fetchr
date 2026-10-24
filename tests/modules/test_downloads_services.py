@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.modules.downloads.model import DownloadStatus
+from app.modules.downloads.model import Download, DownloadStatus
 from app.modules.downloads.services import (
     DownloadNotFound,
     DownloadNotReady,
@@ -161,3 +161,25 @@ def test_file_link_only_for_completed_downloads(session_factory, tmp_path):
     assert url == f"https://b2.example/downloads/alice/{created.id}/video.mp4?sig=abc"
     with pytest.raises(DownloadNotFound):
         service.file_link("bob", created.id)
+
+
+def test_fail_interrupted_marks_unfinished_downloads_failed(session_factory, tmp_path):
+    service = make_service(session_factory, tmp_path)
+    done = service.create_download("alice", "https://facebook.com/watch?v=1")
+    service.process_download(done.id)
+    queued = service.create_download("alice", "https://facebook.com/watch?v=2")
+    stuck = service.create_download("alice", "https://facebook.com/watch?v=3")
+    with session_factory() as session:  # simulate a process killed mid-upload
+        row = session.get(Download, stuck.id)
+        row.status = DownloadStatus.UPLOADING
+        session.add(row)
+        session.commit()
+
+    assert service.fail_interrupted() == 2
+
+    assert service.get_download("alice", done.id).status == DownloadStatus.COMPLETED
+    for download_id, was in [(queued.id, "queued"), (stuck.id, "uploading")]:
+        download = service.get_download("alice", download_id)
+        assert download.status == DownloadStatus.FAILED
+        assert download.error == f"interrupted by a server restart while {was}; submit it again"
+    assert service.fail_interrupted() == 0  # nothing left to recover

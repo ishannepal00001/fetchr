@@ -59,3 +59,18 @@ def test_download_service_is_wired_with_b2_settings(settings):
 
     assert isinstance(app.state.downloads, DownloadService)
     assert app.state.downloads._storage.bucket == "bucket"
+
+
+def test_startup_fails_downloads_interrupted_by_previous_process(settings):
+    from app.modules.downloads.model import DownloadStatus
+
+    app = create_app(settings)
+    with TestClient(app):
+        stuck = app.state.downloads.create_download("my-client", "https://facebook.com/watch?v=1")
+    # the "process" dies before the background task ran; a new one starts on the same DB
+
+    app = create_app(settings)
+    with TestClient(app):
+        download = app.state.downloads.get_download("my-client", stuck.id)
+    assert download.status == DownloadStatus.FAILED
+    assert "interrupted by a server restart" in download.error
