@@ -12,6 +12,10 @@ Per request:
 3. scope["state"]["client_id"] / ["next_code"] are set (request.state.* in routers).
 4. Every response from here on, including 4xx/5xx, carries X-Fetchr-Next-Code:
    the code has already rotated, so the client must always receive the new one.
+   An exception nobody caught would otherwise become a 500 written by Starlette's
+   outermost ServerErrorMiddleware, which never passes through here. So this
+   middleware sends that 500 itself (with the header), then re-raises so the
+   traceback is still logged.
 """
 
 from collections.abc import Iterable
@@ -62,9 +66,21 @@ class RollingCodeMiddleware:
         state["client_id"] = client_id
         state["next_code"] = next_code
 
+        response_started = False
+
         async def send_with_next_code(message: Message) -> None:
+            nonlocal response_started
             if message["type"] == "http.response.start":
+                response_started = True
                 MutableHeaders(scope=message).append(NEXT_CODE_HEADER, next_code)
             await send(message)
 
-        await self.app(scope, receive, send_with_next_code)
+        try:
+            await self.app(scope, receive, send_with_next_code)
+        except Exception:
+            # Already started (e.g. a background task failing after the response was
+            # sent): the client has its code, nothing more to send.
+            if not response_started:
+                response = JSONResponse({"detail": "internal server error"}, status_code=500)
+                await response(scope, receive, send_with_next_code)
+            raise
