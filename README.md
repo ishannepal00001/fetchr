@@ -2,7 +2,7 @@
 
 A small self-hosted media downloader API. A client sends a URL (mostly Facebook in v1). fetchr downloads it with **yt-dlp**, uploads it to **Backblaze B2**, checks that the upload arrived intact, and records it in a **SQLite** database. Every request is authenticated with a **rolling one-time code**.
 
-> Status: **Stage 4 in progress**. Core, auth, B2 storage, the yt-dlp downloader and the download service are built and tested; the v1 HTTP routes are next. See [Roadmap](#roadmap).
+> Status: **Stages 1–4 done**. The API works end to end (auth, downloads, B2); deployment to Render is next. See [Roadmap](#roadmap).
 
 ---
 
@@ -115,7 +115,7 @@ scripts/start.sh              # production / Render start command: 0.0.0.0:$PORT
 1. **Core**: config, database, app factory, `/health` *(done)*
 2. **Auth**: `ClientCredential`, `RollingCodeMiddleware`, rotation + grace window, with tests *(done)*
 3. **Storage**: B2 upload / verify / presign / delete (tested with moto) *(done)*
-4. **Downloads**: `Download` model, `process_download` pipeline, yt-dlp downloader *(done)*; v1 schemas + routes *(next)*
+4. **Downloads**: `Download` model, `process_download` pipeline, yt-dlp downloader, v1 schemas + routes *(done)*
 5. **Deploy**: Render (Dockerfile with ffmpeg, `scripts/start.sh`, 1 worker because of SQLite), rate limiting
 
 Later: live progress streaming (SSE).

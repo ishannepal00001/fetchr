@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.v1.router import api_router
 from app.core.config import Settings, get_settings
 from app.core.database import create_db_and_tables, make_engine, make_session_factory
 from app.core.downloader import YtDlpDownloader
@@ -61,6 +62,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health() -> dict:
         return {"status": "ok"}
 
-    # TODO (Stage 4): include api.v1.router (routes use app.state.downloads).
+    app.include_router(api_router)
 
     return app
