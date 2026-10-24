@@ -46,9 +46,9 @@ Because the rotation is a single atomic statement, two requests with the same co
 
 ```
 app/
-├── main.py                  app factory, lifespan (tables + seed code), middleware, routers
+├── main.py                  create_app(): reads settings, lifespan (tables + seed code), middleware, routers
 ├── core/                    shared infrastructure
-│   ├── config.py            settings from env / .env
+│   ├── config.py            settings from env / .env (the only place env is read)
 │   ├── database.py          SQLite engine (WAL), sessions
 │   ├── security.py          generate / hash codes
 │   ├── downloader.py        yt-dlp wrapper (implements the downloads Downloader protocol)
@@ -102,7 +102,7 @@ Requires **ffmpeg** on the PATH: Facebook usually serves video and audio as sepa
 ```bash
 uv sync                       # or: pip install -e .
 cp .env.example .env
-uvicorn app.main:app --reload
+uvicorn app.main:create_app --factory --reload
 ```
 
 ---
