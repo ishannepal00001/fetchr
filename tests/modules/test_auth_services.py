@@ -3,6 +3,7 @@
 import threading
 from datetime import timedelta
 
+import pytest
 from sqlmodel import select
 
 from app.core.database import create_db_and_tables, make_engine, make_session_factory
@@ -74,11 +75,12 @@ def test_grace_window_expires(session_factory):
     assert auth.verify_and_rotate("alice", "seed") is None
 
 
-def test_concurrent_requests_with_same_code_only_one_succeeds(tmp_path):
+def race(tmp_path, grace_seconds: int) -> list[str | None]:
+    """8 threads send the same code at once; returns each thread's result."""
     # A file DB, so each thread gets its own real connection.
     engine = make_engine(f"sqlite:///{tmp_path / 'race.db'}")
     create_db_and_tables(engine)
-    auth = AuthService(make_session_factory(engine), grace_seconds=0)
+    auth = AuthService(make_session_factory(engine), grace_seconds=grace_seconds)
     auth.seed_client("alice", "seed")
 
     barrier = threading.Barrier(8)
@@ -96,7 +98,21 @@ def test_concurrent_requests_with_same_code_only_one_succeeds(tmp_path):
     engine.dispose()
 
     assert len(results) == 8  # every attempt finished (none crashed on a locked DB)
+    return results
+
+
+@pytest.mark.parametrize("attempt", range(20))  # races are timing-dependent; repeat to catch them
+def test_concurrent_same_code_without_grace_exactly_one_succeeds(tmp_path, attempt):
+    results = race(tmp_path, grace_seconds=0)
+
     assert len([r for r in results if r is not None]) == 1
+
+
+@pytest.mark.parametrize("attempt", range(20))
+def test_concurrent_same_code_with_grace_at_most_two_succeed(tmp_path, attempt):
+    results = race(tmp_path, grace_seconds=60)
+
+    assert 1 <= len([r for r in results if r is not None]) <= 2
 
 
 def test_reset_code_replaces_code(session_factory):

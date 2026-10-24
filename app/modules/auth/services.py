@@ -36,6 +36,8 @@ class AuthService:
         Grace window: if the client lost the response carrying its new code, it will
         resend the previous one. That is accepted once within grace_seconds of the last
         rotation; prev_code_hash is then cleared so it can't be replayed.
+        So with grace on, one code can succeed at most twice (once normally, once via
+        grace); with grace_seconds=0, exactly once.
         """
         sent_hash = hash_code(code)
         new_code = generate_code()
@@ -47,7 +49,7 @@ class AuthService:
                 .where(ClientCredential.client_id == client_id, ClientCredential.code_hash == sent_hash)
                 .values(prev_code_hash=sent_hash, code_hash=hash_code(new_code), rotated_at=now)
             )
-            if rotated.rowcount == 0:
+            if rotated.rowcount == 0 and self._grace:  # grace_seconds=0 turns the grace window off
                 rotated = session.exec(
                     update(ClientCredential)
                     .where(

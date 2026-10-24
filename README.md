@@ -96,14 +96,17 @@ Copy `.env.example` to `.env` and fill it in. Key values:
 - `B2_*`: Backblaze B2 S3-compatible endpoint, key, and bucket.
 - `FETCHR_COOKIES_FILE`: optional, for Facebook videos that need login.
 
-## Running (from Stage 1)
+## Running
 Requires **ffmpeg** on the PATH: Facebook usually serves video and audio as separate streams, and yt-dlp uses ffmpeg to merge them.
 
 ```bash
-uv sync                       # or: pip install -e .
-cp .env.example .env
-uvicorn app.main:create_app --factory --reload
+cp .env.example .env          # fill in FETCHR_SEED_CODE and the B2_* values
+scripts/dev.sh                # local: auto-reload, http://127.0.0.1:8000 (PORT=9000 to change)
+scripts/test.sh               # run the tests (extra args go to pytest)
+scripts/start.sh              # production / Render start command: 0.0.0.0:$PORT, 1 worker
 ```
+
+`start.sh` reads settings from real environment variables (set them in Render's dashboard); a `.env` file is optional there. It runs a single worker on purpose: SQLite allows one writer, and background downloads run inside the server process.
 
 ---
 
