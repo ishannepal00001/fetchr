@@ -88,6 +88,104 @@ tmp/                         yt-dlp scratch space (gitignored)
 
 Every endpoint except `/health` and the docs requires `X-Client-Id` + `X-Fetchr-Code`.
 
+### Headers
+
+| Header | Direction | Notes |
+|---|---|---|
+| `X-Client-Id` | request | your client id |
+| `X-Fetchr-Code` | request | your current one-time code |
+| `X-Fetchr-Next-Code` | response | the code to send next time. On every response after auth passes (2xx, 307, 4xx, 500); not on a `401` |
+
+JSON success bodies also carry the next code as `next_code`. Error bodies (`404`, `409`, `422`, `500`) don't, so read it from the header.
+
+### Request: `POST /api/v1/downloads`
+
+```json
+{
+  "url": "https://www.facebook.com/watch?v=…",
+  "format": null
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `url` | string, required | http(s) URL, max 2048 chars |
+| `format` | string \| null | yt-dlp format selector, max 200 chars. `null` = `bv*+ba/b` (best video + best audio, merged to mp4) |
+
+Query parameters:
+- `GET /api/v1/downloads`: `offset` (≥ 0, default 0), `limit` (1–100, default 50)
+- `GET /api/v1/downloads/{id}/file`: `redirect` (bool, default `false`)
+
+### Response: a download
+
+Returned by `POST /api/v1/downloads` (202) and `GET /api/v1/downloads/{id}` (200).
+
+```json
+{
+  "id": "3f6c2a1e-…",
+  "source_url": "https://www.facebook.com/watch?v=…",
+  "status": "completed",
+  "title": "Some video",
+  "filename": "1234567890.mp4",
+  "content_type": "video/mp4",
+  "filesize": 48213374,
+  "error": null,
+  "created_at": "2026-10-24T14:00:00Z",
+  "updated_at": "2026-10-24T14:01:12Z",
+  "next_code": "…"
+}
+```
+
+A download row is both the job and its result, so its fields fill in at different times:
+
+| Field | Type | Set when |
+|---|---|---|
+| `id`, `source_url`, `created_at` | uuid, string, datetime | at creation |
+| `status` | `queued` \| `downloading` \| `uploading` \| `verifying` \| `completed` \| `failed` | changes at each step |
+| `updated_at` | datetime | every status change |
+| `title`, `filename`, `content_type`, `filesize` (bytes) | string \| null, int \| null | after yt-dlp has fetched the file (from `uploading` on). `null` before that |
+| `error` | string \| null | only when `status` is `failed`: why it failed. `null` otherwise |
+| `next_code` | string | always |
+
+`POST` returns the row as it was inserted: `status: "queued"` and every result field `null`. Poll `GET /api/v1/downloads/{id}` until `status` is `completed` or `failed`.
+
+### Response: list of downloads
+
+`GET /api/v1/downloads` (200), newest first. Items don't carry their own `next_code`.
+
+```json
+{
+  "items": [ { "id": "…", "status": "completed", "…": "same fields as a download, without next_code" } ],
+  "offset": 0,
+  "limit": 50,
+  "next_code": "…"
+}
+```
+
+### Response: file link
+
+`GET /api/v1/downloads/{id}/file` (200), only once `status` is `completed`. Download the file straight from `url` (it is served as an attachment).
+
+```json
+{
+  "url": "https://s3.us-west-004.backblazeb2.com/…?X-Amz-Signature=…",
+  "expires_in": 3600,
+  "next_code": "…"
+}
+```
+
+With `?redirect=true` you get a `307` to that URL instead, with no body.
+
+### Errors
+
+| Status | Body | When |
+|---|---|---|
+| `401` | `{"detail": "unauthorized"}` | missing headers or wrong code. The endpoint never ran and the code didn't rotate |
+| `404` | `{"detail": "download not found"}` | no such id, or it belongs to another client |
+| `409` | `{"detail": "download not completed yet"}` | `/file` asked for a download that isn't `completed` |
+| `422` | FastAPI's `{"detail": [ … ]}` | invalid body, query parameter, or id (not a UUID) |
+| `500` | `{"detail": "internal server error"}` | an unexpected failure (e.g. the database or disk). Still carries `X-Fetchr-Next-Code` |
+
 ---
 
 ## Configuration
