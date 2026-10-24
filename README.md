@@ -50,7 +50,7 @@ app/
 ├── core/                    shared infrastructure
 │   ├── config.py            settings from env / .env
 │   ├── database.py          SQLite engine (WAL), sessions
-│   ├── security.py          generate / hash / compare codes
+│   ├── security.py          generate / hash codes
 │   ├── downloader.py        yt-dlp wrapper (implements the downloads Downloader protocol)
 │   └── storage.py           Backblaze B2: upload, verify, presigned URL, delete
 ├── middlewares/

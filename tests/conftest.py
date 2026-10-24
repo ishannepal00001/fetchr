@@ -11,17 +11,15 @@ from collections.abc import Callable, Iterator
 
 import pytest
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session
 
-import app.modules.downloads.model  # noqa: F401  registers the table on SQLModel.metadata
+from app.core.database import create_db_and_tables, make_engine, make_session_factory
 
 
 @pytest.fixture
 def session_factory() -> Iterator[Callable[[], Session]]:
     """In-memory SQLite shared across sessions (StaticPool), tables created."""
-    engine = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
-    SQLModel.metadata.create_all(engine)
-    yield lambda: Session(engine)
+    engine = make_engine("sqlite://", poolclass=StaticPool)
+    create_db_and_tables(engine)
+    yield make_session_factory(engine)
     engine.dispose()
