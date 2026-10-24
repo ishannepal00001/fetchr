@@ -1,18 +1,25 @@
-# fetchr — project metadata (comments only; filled in during Stage 1)
-#
-# [project]
-# name = "fetchr"
-# requires-python = ">=3.12"
-#
-# Runtime dependencies:
-#   fastapi              - HTTP framework
-#   uvicorn[standard]    - ASGI server
-#   sqlmodel             - ORM (SQLAlchemy + Pydantic): table models in modules/*/model.py
-#   pydantic-settings    - env/.env config (app/core/config.py)
-#   yt-dlp               - media downloader (Facebook first)
-#   boto3                - Backblaze B2 via its S3-compatible API (app/core/storage.py)
-#   alembic              - DB migrations (Stage 5)
-#
-# Dev dependencies:
-#   pytest, httpx        - tests + TestClient
-#   moto                 - fake S3/B2 for storage tests
+[project]
+name = "fetchr"
+version = "0.1.0"
+description = "Self-hosted media downloader API: yt-dlp -> Backblaze B2 -> SQLite"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",            # HTTP framework
+    "uvicorn[standard]",  # ASGI server
+    "sqlmodel",           # ORM (SQLAlchemy + Pydantic): table models in modules/*/model.py
+    "pydantic-settings",  # env/.env config (app/core/config.py)
+    "yt-dlp",             # media downloader (Facebook first)
+    "boto3",              # Backblaze B2 via its S3-compatible API (app/core/storage.py)
+    "alembic",            # DB migrations (Stage 5)
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "httpx",  # TestClient
+    "moto",   # fake S3/B2 for storage tests
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
