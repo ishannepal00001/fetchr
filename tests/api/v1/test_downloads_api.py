@@ -20,7 +20,7 @@ class FakeDownloader:
     def __init__(self) -> None:
         self.fail = False
 
-    def download(self, url: str, dest_dir: Path, format: str | None = None) -> FetchedMedia:
+    def download(self, url: str, dest_dir: Path, format: str | None = None, should_stop=None) -> FetchedMedia:
         if self.fail:
             raise RuntimeError("Unsupported URL")
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -35,7 +35,7 @@ class FakeStorage:
     def __init__(self) -> None:
         self.objects: dict[str, tuple[int, str]] = {}
 
-    def upload_file(self, local_path, key, sha256, content_type):
+    def upload_file(self, local_path, key, sha256, content_type, should_stop=None):
         self.objects[key] = (local_path.stat().st_size, sha256)
 
     def verify_upload(self, key, expected_size, expected_sha256):
@@ -239,6 +239,32 @@ def test_file_link_unknown_or_other_client_is_404(alice, bob):
     assert alice.get(f"/api/v1/downloads/{uuid.uuid4()}/file").status_code == 404
 
 
+def test_cancel_queued_download(alice, app):
+    queued = app.state.test_service.create_download("alice", "https://facebook.com/watch?v=9")  # never processed
+
+    response = alice.post(f"/api/v1/downloads/{queued.id}/cancel")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["next_code"] == response.headers[NEXT_CODE_HEADER]
+    assert alice.post(f"/api/v1/downloads/{queued.id}/cancel").status_code == 200  # again: no-op
+    assert alice.get(f"/api/v1/downloads/{queued.id}/file").status_code == 409
+
+
+def test_cancel_finished_download_is_409(alice, app):
+    assert alice.post(f"/api/v1/downloads/{create(alice)['id']}/cancel").status_code == 409  # completed
+    app.state.fake_downloader.fail = True
+    assert alice.post(f"/api/v1/downloads/{create(alice)['id']}/cancel").status_code == 409  # failed
+
+
+def test_cancel_unknown_or_other_clients_download_is_404(alice, bob, app):
+    queued = app.state.test_service.create_download("alice", "https://facebook.com/watch?v=9")
+
+    assert bob.post(f"/api/v1/downloads/{queued.id}/cancel").status_code == 404
+    assert alice.post(f"/api/v1/downloads/{uuid.uuid4()}/cancel").status_code == 404
+    assert alice.get(f"/api/v1/downloads/{queued.id}").json()["status"] == "queued"
+
+
 def test_openapi_lists_the_routes(test_client):
     paths = test_client.get("/openapi.json").json()["paths"]
 
@@ -246,4 +272,5 @@ def test_openapi_lists_the_routes(test_client):
         "/api/v1/downloads",
         "/api/v1/downloads/{download_id}",
         "/api/v1/downloads/{download_id}/file",
+        "/api/v1/downloads/{download_id}/cancel",
     }

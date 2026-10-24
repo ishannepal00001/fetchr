@@ -7,7 +7,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from app.core.storage import B2Storage, region_from_endpoint
+from app.core.storage import B2Storage, UploadStopped, region_from_endpoint
 
 ENDPOINT = "https://s3.us-west-004.backblazeb2.com"
 BUCKET = "fetchr-test"
@@ -69,6 +69,19 @@ def test_upload_without_content_type_uses_octet_stream(storage, s3, video):
     storage.upload_file(video, KEY, SHA, None)
 
     assert s3.head_object(Bucket=BUCKET, Key=KEY)["ContentType"] == "application/octet-stream"
+
+
+def test_upload_aborts_when_should_stop_turns_true(storage, video):
+    # A small file goes up in one PUT and the callback fires after it, so the object
+    # can still land; that's why process_download deletes the key after any stop.
+    with pytest.raises(UploadStopped):
+        storage.upload_file(video, KEY, SHA, "video/mp4", should_stop=lambda: True)
+
+
+def test_upload_completes_while_should_stop_is_false(storage, video):
+    storage.upload_file(video, KEY, SHA, "video/mp4", should_stop=lambda: False)
+
+    assert storage.verify_upload(KEY, len(DATA), SHA) is True
 
 
 def test_verify_passes_after_upload(storage, video):
@@ -135,7 +148,7 @@ def test_download_service_end_to_end_with_b2_storage(storage, s3, session_factor
     from app.modules.downloads.services import DownloadService, FetchedMedia
 
     class FakeDownloader:
-        def download(self, url, dest_dir, format=None):
+        def download(self, url, dest_dir, format=None, should_stop=None):
             dest_dir.mkdir(parents=True, exist_ok=True)
             path = dest_dir / "123.mp4"
             path.write_bytes(DATA)

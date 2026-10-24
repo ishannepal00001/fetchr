@@ -7,6 +7,7 @@ import pytest
 
 from app.modules.downloads.model import Download, DownloadStatus
 from app.modules.downloads.services import (
+    DownloadNotCancellable,
     DownloadNotFound,
     DownloadNotReady,
     DownloadService,
@@ -15,13 +16,20 @@ from app.modules.downloads.services import (
 
 
 class FakeDownloader:
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(self, fail: bool = False, during=None) -> None:
         self.fail = fail
+        self.during = during  # called mid-download, e.g. to cancel it
+        self.stopped = False
 
-    def download(self, url: str, dest_dir: Path, format: str | None = None) -> FetchedMedia:
+    def download(self, url: str, dest_dir: Path, format: str | None = None, should_stop=None) -> FetchedMedia:
         dest_dir.mkdir(parents=True, exist_ok=True)
         path = dest_dir / "video.mp4"
         path.write_bytes(b"fake video bytes")  # partial file, as yt-dlp might leave behind
+        if self.during:
+            self.during()
+        if should_stop and should_stop():
+            self.stopped = True
+            raise RuntimeError("stopped on request")
         if self.fail:
             raise RuntimeError("Unsupported URL")
         return FetchedMedia(path=path, title="A video", content_type="video/mp4")
@@ -30,20 +38,28 @@ class FakeDownloader:
 class FakeStorage:
     bucket = "test-bucket"
 
-    def __init__(self, verify_ok: bool = True, upload_errors: int = 0) -> None:
+    def __init__(self, verify_ok: bool = True, upload_errors: int = 0, during_upload=None, during_verify=None) -> None:
         self.verify_ok = verify_ok
         self.upload_errors = upload_errors  # how many uploads raise before succeeding
+        self.during_upload = during_upload
+        self.during_verify = during_verify
         self.objects: dict[str, tuple[int, str]] = {}
         self.upload_calls = 0
 
-    def upload_file(self, local_path: Path, key: str, sha256: str, content_type: str | None) -> None:
+    def upload_file(self, local_path: Path, key: str, sha256: str, content_type: str | None, should_stop=None) -> None:
         self.upload_calls += 1
+        if self.during_upload:
+            self.during_upload()
+        if should_stop and should_stop():
+            raise RuntimeError("stopped on request")
         if self.upload_errors:
             self.upload_errors -= 1
             raise ConnectionError("B2 unreachable")
         self.objects[key] = (local_path.stat().st_size, sha256)
 
     def verify_upload(self, key: str, expected_size: int, expected_sha256: str) -> bool:
+        if self.during_verify:
+            self.during_verify()
         return self.verify_ok and self.objects.get(key) == (expected_size, expected_sha256)
 
     def presigned_url(self, key: str) -> str:
@@ -60,6 +76,7 @@ def make_service(session_factory, tmp_path, downloader=None, storage=None, retri
         storage=storage or FakeStorage(),
         tmp_dir=tmp_path,
         upload_retries=retries,
+        stop_check_interval=0,  # read the DB on every check, so tests see a cancel at once
     )
 
 
@@ -183,3 +200,89 @@ def test_fail_interrupted_marks_unfinished_downloads_failed(session_factory, tmp
         assert download.status == DownloadStatus.FAILED
         assert download.error == f"interrupted by a server restart while {was}; submit it again"
     assert service.fail_interrupted() == 0  # nothing left to recover
+
+
+def cancel_hook(service, holder):
+    """A `during` callback that cancels the download whose id is put in holder[0]."""
+    return lambda: service.cancel_download("alice", holder[0])
+
+
+def test_cancel_queued_download_never_runs(session_factory, tmp_path):
+    storage = FakeStorage()
+    service = make_service(session_factory, tmp_path, storage=storage)
+    created = service.create_download("alice", "https://facebook.com/watch?v=1")
+
+    cancelled = service.cancel_download("alice", created.id)
+    service.process_download(created.id)
+
+    assert cancelled.status == DownloadStatus.CANCELLED
+    assert service.get_download("alice", created.id).status == DownloadStatus.CANCELLED
+    assert storage.upload_calls == 0
+    assert not (tmp_path / str(created.id)).exists()
+
+
+def test_cancel_during_download_stops_it_and_cleans_tmp(session_factory, tmp_path):
+    holder = []
+    downloader = FakeDownloader()
+    storage = FakeStorage()
+    service = make_service(session_factory, tmp_path, downloader=downloader, storage=storage)
+    downloader.during = cancel_hook(service, holder)
+    holder.append(service.create_download("alice", "https://facebook.com/watch?v=1").id)
+
+    service.process_download(holder[0])
+
+    download = service.get_download("alice", holder[0])
+    assert downloader.stopped
+    assert download.status == DownloadStatus.CANCELLED
+    assert download.error is None
+    assert storage.upload_calls == 0
+    assert not (tmp_path / str(holder[0])).exists()
+
+
+@pytest.mark.parametrize("stage", ["during_upload", "during_verify"])
+def test_cancel_during_upload_or_verify_removes_object_and_tmp(session_factory, tmp_path, stage):
+    holder = []
+    storage = FakeStorage()
+    service = make_service(session_factory, tmp_path, storage=storage)
+    setattr(storage, stage, cancel_hook(service, holder))
+    holder.append(service.create_download("alice", "https://facebook.com/watch?v=1").id)
+
+    service.process_download(holder[0])
+
+    download = service.get_download("alice", holder[0])
+    assert download.status == DownloadStatus.CANCELLED
+    assert download.b2_key is None
+    assert storage.upload_calls == 1  # a stop isn't retried
+    assert storage.objects == {}
+    assert not (tmp_path / str(holder[0])).exists()
+
+
+def test_cancel_is_idempotent_and_finished_downloads_cant_be_cancelled(session_factory, tmp_path):
+    service = make_service(session_factory, tmp_path)
+    done = service.create_download("alice", "https://facebook.com/watch?v=1")
+    service.process_download(done.id)
+    failed = service.create_download("alice", "https://example.com/nope")
+    service._downloader.fail = True
+    service.process_download(failed.id)
+    queued = service.create_download("alice", "https://facebook.com/watch?v=2")
+
+    service.cancel_download("alice", queued.id)
+    assert service.cancel_download("alice", queued.id).status == DownloadStatus.CANCELLED
+    for download in (done, failed):
+        with pytest.raises(DownloadNotCancellable):
+            service.cancel_download("alice", download.id)
+    with pytest.raises(DownloadNotFound):
+        service.cancel_download("bob", queued.id)
+    assert service.get_download("alice", done.id).status == DownloadStatus.COMPLETED
+
+
+def test_should_stop_reads_db_at_most_once_per_interval(session_factory, tmp_path):
+    service = DownloadService(session_factory, FakeDownloader(), FakeStorage(), tmp_path, stop_check_interval=60)
+    created = service.create_download("alice", "https://facebook.com/watch?v=1")
+    should_stop = service._stop_check(created.id)
+
+    assert should_stop() is False  # first call reads the DB
+    service.cancel_download("alice", created.id)
+    assert should_stop() is False  # inside the interval: cached answer
+
+    assert service._stop_check(created.id)() is True  # a fresh check sees the cancel

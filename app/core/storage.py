@@ -12,7 +12,13 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
+from app.modules.downloads.services import StopCheck
+
 DEFAULT_REGION = "us-east-1"
+
+
+class UploadStopped(Exception):
+    """should_stop() turned true, so the upload was aborted part way."""
 
 
 def region_from_endpoint(endpoint_url: str) -> str:
@@ -50,8 +56,25 @@ class B2Storage:
             ),
         )
 
-    def upload_file(self, local_path: Path, key: str, sha256: str, content_type: str | None) -> None:
-        """Raises on failure; process_download retries. Large files go up as multipart automatically."""
+    def upload_file(
+        self,
+        local_path: Path,
+        key: str,
+        sha256: str,
+        content_type: str | None,
+        should_stop: StopCheck | None = None,
+    ) -> None:
+        """
+        Raises on failure; process_download retries. Large files go up as multipart automatically.
+        boto3 calls Callback as bytes go out; raising there aborts the transfer (and an
+        unfinished multipart upload), and the error comes back out of upload_file. A
+        small single-PUT file may already be stored by then, so the caller deletes the key.
+        """
+
+        def stop_callback(_bytes_sent: int) -> None:
+            if should_stop():
+                raise UploadStopped("stopped on request")
+
         self._client.upload_file(
             str(local_path),
             self.bucket,
@@ -60,6 +83,7 @@ class B2Storage:
                 "Metadata": {"sha256": sha256},
                 "ContentType": content_type or "application/octet-stream",
             },
+            Callback=stop_callback if should_stop else None,
         )
 
     def verify_upload(self, key: str, expected_size: int, expected_sha256: str) -> bool:

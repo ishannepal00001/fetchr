@@ -31,7 +31,7 @@ client ──GET /api/v1/downloads/{id}/file──▶ presigned B2 link (downloa
 Because the rotation is a single atomic statement, two requests with the same code can't both succeed.
 
 ### Download lifecycle
-`queued → downloading → uploading → verifying → completed | failed`
+`queued → downloading → uploading → verifying → completed | failed | cancelled`
 
 1. yt-dlp downloads into `tmp/<id>/`, using a cookies file for Facebook if one is configured.
 2. The local file's sha256 and size are computed.
@@ -39,6 +39,8 @@ Because the rotation is a single atomic statement, two requests with the same co
 4. **Verify**: `head_object` must report the same size and sha256 metadata (the bytes aren't re-downloaded).
 5. **Only after verification passes** is the row marked `completed` and `tmp/<id>/` deleted.
 6. If verification keeps failing (after `FETCHR_UPLOAD_RETRIES` attempts), the B2 object is removed, the row is marked `failed`, and the **temp file is kept** so the video isn't lost.
+
+**Cancelling** (`POST /api/v1/downloads/{id}/cancel`) flips the row to `cancelled` straight away. The worker checks for that about once a second while yt-dlp downloads and while the file uploads (and before each status change), stops, and deletes `tmp/<id>/` and any B2 object. The ffmpeg merge at the end of a download can't be interrupted, so a cancel during it takes effect right after. A cancelled download is never retried or resumed.
 
 ---
 
@@ -84,6 +86,7 @@ tmp/                         yt-dlp scratch space (gitignored)
 | GET | `/api/v1/downloads` | list your downloads (`?offset&limit`) |
 | GET | `/api/v1/downloads/{id}` | status + metadata |
 | GET | `/api/v1/downloads/{id}/file` | presigned B2 link (`?redirect=true` → 307) |
+| POST | `/api/v1/downloads/{id}/cancel` | stop a queued or running download |
 | GET | `/health` | liveness, no auth |
 
 Every endpoint except `/health` and the docs requires `X-Client-Id` + `X-Fetchr-Code`.
@@ -141,13 +144,17 @@ A download row is both the job and its result, so its fields fill in at differen
 | Field | Type | Set when |
 |---|---|---|
 | `id`, `source_url`, `created_at` | uuid, string, datetime | at creation |
-| `status` | `queued` \| `downloading` \| `uploading` \| `verifying` \| `completed` \| `failed` | changes at each step |
+| `status` | `queued` \| `downloading` \| `uploading` \| `verifying` \| `completed` \| `failed` \| `cancelled` | changes at each step |
 | `updated_at` | datetime | every status change |
 | `title`, `filename`, `content_type`, `filesize` (bytes) | string \| null, int \| null | after yt-dlp has fetched the file (from `uploading` on). `null` before that |
 | `error` | string \| null | only when `status` is `failed`: why it failed. `null` otherwise |
 | `next_code` | string | always |
 
-`POST` returns the row as it was inserted: `status: "queued"` and every result field `null`. Poll `GET /api/v1/downloads/{id}` until `status` is `completed` or `failed`.
+`POST` returns the row as it was inserted: `status: "queued"` and every result field `null`. Poll `GET /api/v1/downloads/{id}` until `status` is `completed`, `failed` or `cancelled`. A cancelled download has `error: null`; any result fields already filled in stay as they were.
+
+### Request: `POST /api/v1/downloads/{id}/cancel`
+
+No body. Returns the download (200) with `status: "cancelled"`. Cancelling an already cancelled download returns it again (200); a `completed` or `failed` one gets `409`.
 
 ### Response: list of downloads
 
@@ -183,6 +190,7 @@ With `?redirect=true` you get a `307` to that URL instead, with no body.
 | `401` | `{"detail": "unauthorized"}` | missing headers or wrong code. The endpoint never ran and the code didn't rotate |
 | `404` | `{"detail": "download not found"}` | no such id, or it belongs to another client |
 | `409` | `{"detail": "download not completed yet"}` | `/file` asked for a download that isn't `completed` |
+| `409` | `{"detail": "download already finished"}` | `/cancel` on a download that is `completed` or `failed` |
 | `422` | FastAPI's `{"detail": [ … ]}` | invalid body, query parameter, or id (not a UUID) |
 | `500` | `{"detail": "internal server error"}` | an unexpected failure (e.g. the database or disk). Still carries `X-Fetchr-Next-Code` |
 

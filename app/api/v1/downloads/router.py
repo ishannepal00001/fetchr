@@ -15,7 +15,12 @@ from app.api.deps import current_client_id, get_downloads, get_settings, next_co
 from app.api.v1.downloads.schemas import DownloadCreate, DownloadList, DownloadRead, DownloadResponse, FileLink
 from app.core.config import Settings
 from app.modules.downloads.model import Download
-from app.modules.downloads.services import DownloadNotFound, DownloadNotReady, DownloadService
+from app.modules.downloads.services import (
+    DownloadNotCancellable,
+    DownloadNotFound,
+    DownloadNotReady,
+    DownloadService,
+)
 
 router = APIRouter()
 
@@ -65,6 +70,27 @@ def get_download(
         download = service.get_download(client_id, download_id)
     except DownloadNotFound:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "download not found") from None
+    return _response(download, code)
+
+
+@router.post(
+    "/{download_id}/cancel",
+    response_model=DownloadResponse,
+    responses={**NOT_FOUND, 409: {"description": "Download already completed or failed"}},
+)
+def cancel_download(
+    download_id: uuid.UUID,
+    service: DownloadService = Depends(get_downloads),
+    client_id: str = Depends(current_client_id),
+    code: str = Depends(next_code),
+) -> DownloadResponse:
+    """Stop a queued or running download. It shows as cancelled at once; cleanup follows shortly."""
+    try:
+        download = service.cancel_download(client_id, download_id)
+    except DownloadNotFound:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "download not found") from None
+    except DownloadNotCancellable:
+        raise HTTPException(status.HTTP_409_CONFLICT, "download already finished") from None
     return _response(download, code)
 
 

@@ -7,7 +7,7 @@ import pytest
 from yt_dlp.utils import DownloadError
 
 from app.core import downloader as downloader_module
-from app.core.downloader import DEFAULT_FORMAT, DownloaderError, YtDlpDownloader
+from app.core.downloader import DEFAULT_FORMAT, DownloaderError, DownloadStopped, YtDlpDownloader
 
 
 class FakeYoutubeDL:
@@ -29,6 +29,8 @@ class FakeYoutubeDL:
         return str(self.outdir / f"{info['id']}.{info['ext']}")
 
     def extract_info(self, url: str, download: bool = True) -> dict:
+        for hook in FakeYoutubeDL.last_opts.get("progress_hooks", []):  # yt-dlp calls these per chunk
+            hook({"status": "downloading"})
         path = self.outdir / "123.mp4"
         path.write_bytes(b"merged video")
         return {
@@ -116,6 +118,25 @@ def test_missing_file_is_an_error(fake_ydl, monkeypatch, tmp_path):
 
     with pytest.raises(DownloaderError, match="no file was written"):
         YtDlpDownloader().download("https://facebook.com/watch?v=1", tmp_path)
+
+
+def test_no_progress_hook_without_should_stop(fake_ydl, tmp_path):
+    YtDlpDownloader().download("https://facebook.com/watch?v=123", tmp_path)
+
+    assert "progress_hooks" not in fake_ydl.last_opts
+
+
+def test_should_stop_aborts_download(fake_ydl, tmp_path):
+    with pytest.raises(DownloadStopped):
+        YtDlpDownloader().download("https://facebook.com/watch?v=123", tmp_path, should_stop=lambda: True)
+
+    assert not (tmp_path / "123.mp4").exists()  # aborted before the file was written
+
+
+def test_should_stop_false_lets_download_finish(fake_ydl, tmp_path):
+    media = YtDlpDownloader().download("https://facebook.com/watch?v=123", tmp_path, should_stop=lambda: False)
+
+    assert media.path.is_file()
 
 
 @pytest.mark.skipif(not os.environ.get("FETCHR_TEST_URL"), reason="set FETCHR_TEST_URL to run against the real network")

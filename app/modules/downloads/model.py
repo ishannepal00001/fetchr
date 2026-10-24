@@ -18,6 +18,16 @@ class DownloadStatus(StrEnum):
     VERIFYING = "verifying"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+# Work is still happening (or about to): the only states a download can be cancelled in.
+ACTIVE_STATUSES = (
+    DownloadStatus.QUEUED,
+    DownloadStatus.DOWNLOADING,
+    DownloadStatus.UPLOADING,
+    DownloadStatus.VERIFYING,
+)
 
 
 class Download(SQLModel, table=True):

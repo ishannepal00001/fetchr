@@ -10,9 +10,9 @@ import mimetypes
 from pathlib import Path
 
 from yt_dlp import YoutubeDL
-from yt_dlp.utils import DownloadError
+from yt_dlp.utils import DownloadCancelled, DownloadError
 
-from app.modules.downloads.services import FetchedMedia
+from app.modules.downloads.services import FetchedMedia, StopCheck
 
 DEFAULT_FORMAT = "bv*+ba/b"  # best video + best audio, else best single file
 
@@ -21,17 +21,25 @@ class DownloaderError(Exception):
     """yt-dlp couldn't produce a single media file for the URL."""
 
 
+class DownloadStopped(DownloaderError):
+    """should_stop() turned true, so the download was aborted part way."""
+
+
 class YtDlpDownloader:
     def __init__(self, cookies_file: Path | None = None, default_format: str = DEFAULT_FORMAT) -> None:
         self._cookies_file = cookies_file
         self._default_format = default_format
 
-    def download(self, url: str, dest_dir: Path, format: str | None = None) -> FetchedMedia:
+    def download(
+        self, url: str, dest_dir: Path, format: str | None = None, should_stop: StopCheck | None = None
+    ) -> FetchedMedia:
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        with YoutubeDL(self._options(dest_dir, format)) as ydl:
+        with YoutubeDL(self._options(dest_dir, format, should_stop)) as ydl:
             try:
                 info = ydl.extract_info(url, download=True)
+            except DownloadCancelled as exc:
+                raise DownloadStopped("stopped on request") from exc
             except DownloadError as exc:
                 raise DownloaderError(_clean(exc)) from exc
             if info is None:
@@ -51,7 +59,7 @@ class YtDlpDownloader:
             content_type=mimetypes.guess_type(path.name)[0],
         )
 
-    def _options(self, dest_dir: Path, format: str | None) -> dict:
+    def _options(self, dest_dir: Path, format: str | None, should_stop: StopCheck | None = None) -> dict:
         opts = {
             "outtmpl": str(dest_dir / "%(id)s.%(ext)s"),  # id-based: safe, collision-free names
             "format": format or self._default_format,
@@ -65,6 +73,14 @@ class YtDlpDownloader:
         }
         if self._cookies_file:
             opts["cookiefile"] = str(self._cookies_file)
+        if should_stop:
+            # yt-dlp calls progress hooks on every chunk; raising DownloadCancelled aborts the download.
+            # (The ffmpeg merge at the end doesn't report progress, so it can't be stopped mid-way.)
+            def stop_hook(_progress: dict) -> None:
+                if should_stop():
+                    raise DownloadCancelled("stopped on request")
+
+            opts["progress_hooks"] = [stop_hook]
         return opts
 
 
