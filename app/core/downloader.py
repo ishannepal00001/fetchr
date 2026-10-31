@@ -4,6 +4,10 @@ yt-dlp downloader. Implements the Downloader protocol from modules/downloads/ser
 Config (cookies file, default format) is passed in by the app setup; this module
 doesn't read settings. The default format merges separate video + audio streams,
 which needs ffmpeg on the PATH.
+
+yt-dlp also saves the video's poster image next to it (writethumbnail). A poster that
+can't be fetched is only a yt-dlp warning, never a failed download; FetchedMedia.poster
+is then None. The poster's remote URL is never passed on.
 """
 
 import mimetypes
@@ -57,6 +61,7 @@ class YtDlpDownloader:
             path=path,
             title=info.get("title"),
             content_type=mimetypes.guess_type(path.name)[0],
+            poster=_poster_path(info),
         )
 
     def _options(self, dest_dir: Path, format: str | None, should_stop: StopCheck | None = None) -> dict:
@@ -68,6 +73,7 @@ class YtDlpDownloader:
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,
+            "writethumbnail": True,  # the best poster only; saved as <id>.<image ext>
             "retries": 3,
             "fragment_retries": 3,
         }
@@ -82,6 +88,15 @@ class YtDlpDownloader:
 
             opts["progress_hooks"] = [stop_hook]
         return opts
+
+
+def _poster_path(info: dict) -> Path | None:
+    """The poster yt-dlp wrote to disk, if any. It sets `filepath` on the thumbnail it saved."""
+    for thumbnail in reversed(info.get("thumbnails") or []):  # yt-dlp sorts them worst -> best
+        filepath = thumbnail.get("filepath")
+        if filepath and Path(filepath).is_file():
+            return Path(filepath)
+    return None
 
 
 def _clean(exc: DownloadError) -> str:

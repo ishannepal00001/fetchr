@@ -47,6 +47,7 @@ class Download(SQLModel, table=True):
     # Set only once the upload has been verified.
     b2_bucket: str | None = None
     b2_key: str | None = None  # downloads/<client_id>/<id>/<filename>
+    thumbnail: str | None = None  # bare name (thumbnail.jpg), next to the video in B2; None if none could be made
 
     error: str | None = None  # set when status == failed
     created_at: datetime = Field(default_factory=utcnow)

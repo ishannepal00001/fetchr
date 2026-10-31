@@ -16,6 +16,7 @@ from app.core.config import Settings, get_settings
 from app.core.database import create_db_and_tables, make_engine, make_session_factory
 from app.core.downloader import YtDlpDownloader
 from app.core.storage import B2Storage
+from app.core.thumbnails import FfmpegThumbnailer
 from app.middlewares.auth import RollingCodeMiddleware
 from app.modules.auth.services import AuthService
 from app.modules.downloads.services import DownloadService
@@ -40,6 +41,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         storage=storage,
         tmp_dir=settings.tmp_dir,
         upload_retries=settings.upload_retries,
+        thumbnailer=FfmpegThumbnailer(),
     )
 
     @asynccontextmanager

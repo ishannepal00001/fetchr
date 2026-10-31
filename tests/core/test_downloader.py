@@ -56,6 +56,7 @@ def test_download_returns_merged_file_and_metadata(fake_ydl, tmp_path):
     assert media.path.read_bytes() == b"merged video"
     assert media.title == "My video"
     assert media.content_type == "video/mp4"
+    assert media.poster is None  # the fake info dict has no thumbnails
 
 
 def test_options_default_format_and_no_cookies(fake_ydl, tmp_path):
@@ -66,6 +67,7 @@ def test_options_default_format_and_no_cookies(fake_ydl, tmp_path):
     assert opts["outtmpl"] == str(tmp_path / "%(id)s.%(ext)s")
     assert opts["merge_output_format"] == "mp4"
     assert opts["noplaylist"] is True
+    assert opts["writethumbnail"] is True
     assert "cookiefile" not in opts
 
 
@@ -88,6 +90,41 @@ def test_falls_back_to_prepare_filename(fake_ydl, monkeypatch, tmp_path):
     media = YtDlpDownloader().download("https://facebook.com/watch?v=123", tmp_path)
 
     assert media.path == tmp_path / "123.mp4"
+
+
+def test_poster_written_by_yt_dlp_is_returned(fake_ydl, monkeypatch, tmp_path):
+    original = FakeYoutubeDL.extract_info
+
+    def extract_info(self, url, download=True):
+        info = original(self, url, download)
+        poster = self.outdir / "123.jpg"
+        poster.write_bytes(b"jpeg")
+        info["thumbnails"] = [
+            {"url": "https://scontent.example/small.jpg"},  # not downloaded: no filepath
+            {"url": "https://scontent.example/big.jpg", "filepath": str(poster)},
+        ]
+        return info
+
+    monkeypatch.setattr(FakeYoutubeDL, "extract_info", extract_info)
+
+    media = YtDlpDownloader().download("https://facebook.com/watch?v=123", tmp_path)
+
+    assert media.poster == tmp_path / "123.jpg"
+    assert media.path == tmp_path / "123.mp4"
+
+
+def test_poster_that_failed_to_download_is_none(fake_ydl, monkeypatch, tmp_path):
+    original = FakeYoutubeDL.extract_info
+
+    def extract_info(self, url, download=True):
+        info = original(self, url, download)
+        # yt-dlp only warns when the poster can't be fetched; the reported path never appears
+        info["thumbnails"] = [{"url": "https://scontent.example/big.jpg", "filepath": str(self.outdir / "123.jpg")}]
+        return info
+
+    monkeypatch.setattr(FakeYoutubeDL, "extract_info", extract_info)
+
+    assert YtDlpDownloader().download("https://facebook.com/watch?v=123", tmp_path).poster is None
 
 
 def test_yt_dlp_error_becomes_clean_downloader_error(fake_ydl, monkeypatch, tmp_path):

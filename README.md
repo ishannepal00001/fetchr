@@ -12,7 +12,7 @@ A small self-hosted media downloader API. A client sends a URL (mostly Facebook 
 client ──POST /api/v1/downloads {url}──▶ RollingCodeMiddleware ──▶ router ──▶ modules/downloads/services
                                           (verify + rotate code)                  │
                                                                                   ▼ background
-                                                       yt-dlp → tmp/<id>/ → upload to B2 → verify → delete tmp
+                                  yt-dlp → tmp/<id>/ → thumbnail (ffmpeg) → upload to B2 → verify → delete tmp
                                                                                   │
 client ◀── X-Fetchr-Next-Code + {id, status: queued} ◀────────────────────────────┘ DB row updated at each step
 client ──GET /api/v1/downloads/{id}──▶ poll until status = completed
@@ -33,14 +33,25 @@ Because the rotation is a single atomic statement, two requests with the same co
 ### Download lifecycle
 `queued → downloading → uploading → verifying → completed | failed | cancelled`
 
-1. yt-dlp downloads into `tmp/<id>/`, using a cookies file for Facebook if one is configured.
+1. yt-dlp downloads into `tmp/<id>/`, using a cookies file for Facebook if one is configured. It also saves the video's poster image there, if it has one.
 2. The local file's sha256 and size are computed.
-3. The file is uploaded to B2 at `downloads/<client_id>/<id>/<filename>`, with the sha256 stored in object metadata.
-4. **Verify**: `head_object` must report the same size and sha256 metadata (the bytes aren't re-downloaded).
-5. **Only after verification passes** is the row marked `completed` and `tmp/<id>/` deleted.
-6. If verification keeps failing (after `FETCHR_UPLOAD_RETRIES` attempts), the B2 object is removed, the row is marked `failed`, and the **temp file is kept** so the video isn't lost.
+3. **Thumbnail** (best effort, see [Thumbnails](#thumbnails)): `thumbnail.jpg` is made and uploaded to `downloads/<client_id>/<id>/thumbnail.jpg`.
+4. The file is uploaded to B2 at `downloads/<client_id>/<id>/<filename>`, with the sha256 stored in object metadata.
+5. **Verify**: `head_object` must report the same size and sha256 metadata (the bytes aren't re-downloaded).
+6. **Only after verification passes** is the row marked `completed` (and `thumbnail` set) and `tmp/<id>/` deleted.
+7. If verification keeps failing (after `FETCHR_UPLOAD_RETRIES` attempts), the B2 objects (video and thumbnail) are removed, the row is marked `failed`, and the **temp file is kept** so the video isn't lost.
 
-**Cancelling** (`POST /api/v1/downloads/{id}/cancel`) flips the row to `cancelled` straight away. The worker checks for that about once a second while yt-dlp downloads and while the file uploads (and before each status change), stops, and deletes `tmp/<id>/` and any B2 object. The ffmpeg merge at the end of a download can't be interrupted, so a cancel during it takes effect right after. A cancelled download is never retried or resumed.
+**Cancelling** (`POST /api/v1/downloads/{id}/cancel`) flips the row to `cancelled` straight away. The worker checks for that about once a second while yt-dlp downloads and while the file uploads (and before each status change), stops, and deletes `tmp/<id>/` and any B2 objects (video and thumbnail). The ffmpeg merge at the end of a download can't be interrupted, so a cancel during it takes effect right after. A cancelled download is never retried or resumed.
+
+### Thumbnails
+Every download gets a `thumbnail.jpg` next to the video in B2, at `downloads/<client_id>/<id>/thumbnail.jpg`, made in the same job before it is marked `completed`:
+
+1. **Poster** (preferred): the video's own poster image, which yt-dlp downloads alongside the video (`writethumbnail`, the best entry of `info["thumbnails"]`). Its Facebook CDN URL is never stored or returned.
+2. **Fallback**: if there is no poster, or ffmpeg can't read it, ffmpeg grabs a frame at 1s into the video (0s if the video is shorter).
+
+Either way the output is a JPEG scaled to 640px wide keeping the aspect ratio (`-vf scale=640:-2 -q:v 5`, roughly quality 80, tens of KB), uploaded with `Content-Type: image/jpeg` and verified like the video. Intermediate files go in a temp dir inside `tmp/<id>/` (never `/app`, which is read-only in the container).
+
+**A thumbnail never fails a download.** Any error (no poster and an unreadable video, ffmpeg error, upload error) is logged as a warning, any partial thumbnail object is deleted, and the download completes with `thumbnail: null`.
 
 ---
 
@@ -54,6 +65,7 @@ app/
 │   ├── database.py          SQLite engine (WAL), sessions
 │   ├── security.py          generate / hash codes
 │   ├── downloader.py        yt-dlp wrapper (implements the downloads Downloader protocol)
+│   ├── thumbnails.py        ffmpeg thumbnailer: poster or video frame → 640px JPEG
 │   └── storage.py           Backblaze B2: upload, verify, presigned URL, delete
 ├── middlewares/
 │   └── auth.py              RollingCodeMiddleware → modules/auth/services
@@ -132,6 +144,7 @@ Returned by `POST /api/v1/downloads` (202) and `GET /api/v1/downloads/{id}` (200
   "filename": "1234567890.mp4",
   "content_type": "video/mp4",
   "filesize": 48213374,
+  "thumbnail": "thumbnail.jpg",
   "error": null,
   "created_at": "2026-10-24T14:00:00Z",
   "updated_at": "2026-10-24T14:01:12Z",
@@ -147,6 +160,7 @@ A download row is both the job and its result, so its fields fill in at differen
 | `status` | `queued` \| `downloading` \| `uploading` \| `verifying` \| `completed` \| `failed` \| `cancelled` | changes at each step |
 | `updated_at` | datetime | every status change |
 | `title`, `filename`, `content_type`, `filesize` (bytes) | string \| null, int \| null | after yt-dlp has fetched the file (from `uploading` on). `null` before that |
+| `thumbnail` | string \| null | only when `status` is `completed`: the bare file name (`"thumbnail.jpg"`), stored next to the video at `downloads/<client_id>/<id>/<thumbnail>`. `null` before that, on `failed`/`cancelled`, and on a completed download whose thumbnail couldn't be made |
 | `error` | string \| null | only when `status` is `failed`: why it failed. `null` otherwise |
 | `next_code` | string | always |
 
@@ -210,6 +224,8 @@ cp .env.example .env          # fill in FETCHR_SEED_CODE and the B2_* values
 ./start.sh                    # build + run the image: http://127.0.0.1:8000 (PORT=9000 to change)
 uv run pytest                 # run the tests
 ```
+
+An existing DB from before a new nullable column (such as `download.thumbnail`) is upgraded in place at startup: the column is added and old rows get `null`.
 
 `start.sh` passes `.env` to the container but points the DB, tmp dir and cookies file at container paths. The SQLite DB lives in the `fetchr-data` volume (`docker volume rm fetchr-data` resets it). On Render, settings come from the dashboard's environment variables. The server runs a single worker on purpose: SQLite allows one writer, and background downloads run inside the server process.
 
