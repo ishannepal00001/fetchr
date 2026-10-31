@@ -203,16 +203,15 @@ Copy `.env.example` to `.env` and fill it in. Key values:
 - `FETCHR_COOKIES_FILE`: optional, for Facebook videos that need login.
 
 ## Running
-Requires **ffmpeg** on the PATH: Facebook usually serves video and audio as separate streams, and yt-dlp uses ffmpeg to merge them.
+Runs in Docker; the image includes **ffmpeg**, which yt-dlp uses to merge Facebook's separate video and audio streams.
 
 ```bash
 cp .env.example .env          # fill in FETCHR_SEED_CODE and the B2_* values
-scripts/dev.sh                # local: auto-reload, http://127.0.0.1:8000 (PORT=9000 to change)
-scripts/test.sh               # run the tests (extra args go to pytest)
-scripts/start.sh              # production / Render start command: 0.0.0.0:$PORT, 1 worker
+./start.sh                    # build + run the image: http://127.0.0.1:8000 (PORT=9000 to change)
+uv run pytest                 # run the tests
 ```
 
-`start.sh` reads settings from real environment variables (set them in Render's dashboard); a `.env` file is optional there. It runs a single worker on purpose: SQLite allows one writer, and background downloads run inside the server process.
+`start.sh` passes `.env` to the container but points the DB, tmp dir and cookies file at container paths. The SQLite DB lives in the `fetchr-data` volume (`docker volume rm fetchr-data` resets it). On Render, settings come from the dashboard's environment variables. The server runs a single worker on purpose: SQLite allows one writer, and background downloads run inside the server process.
 
 ---
 
@@ -222,6 +221,6 @@ scripts/start.sh              # production / Render start command: 0.0.0.0:$PORT
 2. **Auth**: `ClientCredential`, `RollingCodeMiddleware`, rotation + grace window, with tests *(done)*
 3. **Storage**: B2 upload / verify / presign / delete (tested with moto) *(done)*
 4. **Downloads**: `Download` model, `process_download` pipeline, yt-dlp downloader, v1 schemas + routes *(done)*
-5. **Deploy**: Render (Dockerfile with ffmpeg, `scripts/start.sh`, 1 worker because of SQLite), rate limiting
+5. **Deploy**: Render (Dockerfile with ffmpeg, 1 worker because of SQLite), rate limiting
 
 Later: live progress streaming (SSE).

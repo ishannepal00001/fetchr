@@ -29,7 +29,6 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=builder --chown=fetchr:fetchr /app /app
-COPY --chown=fetchr:fetchr scripts/start.sh ./scripts/start.sh
 
 # SQLite DB and download scratch space live under /app/data, which is writable by the
 # app user. Mount a volume there to keep them across restarts; otherwise they reset.
@@ -46,5 +45,12 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"PORT\"]}/health', timeout=4)"
 
-# No uv in this image, so start.sh runs `python -m uvicorn` from the venv on PATH.
-CMD ["scripts/start.sh"]
+# Listens on 0.0.0.0:$PORT (Render sets PORT). Exactly 1 worker: SQLite has one writer and
+# background downloads run in-process. Trusts X-Forwarded-* from Render's proxy.
+# Shell form so $PORT expands; exec keeps uvicorn as PID 1 to receive signals.
+CMD exec uvicorn app.main:create_app --factory \
+    --host 0.0.0.0 \
+    --port "$PORT" \
+    --workers 1 \
+    --proxy-headers \
+    --forwarded-allow-ips '*'
