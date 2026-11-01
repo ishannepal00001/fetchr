@@ -2,7 +2,7 @@
 
 A small self-hosted media downloader API. A client sends a URL (mostly Facebook in v1). fetchr downloads it with **yt-dlp**, uploads it to **Backblaze B2**, checks that the upload arrived intact, and records it in a **SQLite** database. It can also **render** a video already in B2: cut clips from it, join them into one MP4, burn in a news-style caption with **ffmpeg**, and upload the result. Every request is authenticated with a **rolling one-time code**.
 
-> Status: **Stages 1–4 done**. The API works end to end (auth, downloads, B2); deployment to Render is next. See [Roadmap](#roadmap).
+> Status: **Stages 1–4 done**, plus renders. The API works end to end (auth, downloads, renders, B2); deployment to Render is next. See [Roadmap](#roadmap).
 
 ---
 
@@ -17,6 +17,10 @@ client ──POST /api/v1/downloads {url}──▶ RollingCodeMiddleware ──�
 client ◀── X-Fetchr-Next-Code + {id, status: queued} ◀────────────────────────────┘ DB row updated at each step
 client ──GET /api/v1/downloads/{id}──▶ poll until status = completed
 client ──GET /api/v1/downloads/{id}/file──▶ presigned B2 link (download straight from B2)
+
+client ──POST /api/v1/renders {source_key, clips, caption?}──▶ same middleware, same job (see Renders)
+                                  B2 source → tmp/<id>/ → ffprobe → ffmpeg (cut + join + caption) → thumbnail → upload to renders/… → verify → delete tmp
+client ──GET /api/v1/renders/{id}──▶ poll until status = completed
 ```
 
 ### Rolling one-time code
@@ -104,7 +108,7 @@ app/
             ├── schemas.py   render request validation (responses reuse the download schema)
             └── router.py    endpoints
 tests/                       mirrors app/: middlewares/, modules/, api/v1/
-tmp/                         yt-dlp scratch space (gitignored)
+tmp/                         yt-dlp and render scratch space (gitignored)
 ```
 
 **Layering rule**
@@ -313,5 +317,8 @@ An existing DB from before a new nullable column (such as `download.thumbnail`) 
 3. **Storage**: B2 upload / verify / presign / delete (tested with moto) *(done)*
 4. **Downloads**: `Download` model, `process_download` pipeline, yt-dlp downloader, v1 schemas + routes *(done)*
 5. **Deploy**: Render (Dockerfile with ffmpeg, 1 worker because of SQLite), rate limiting
+6. **Renders**: cut + join clips from a download into one captioned MP4 (`/api/v1/renders`) *(done)*
+
+Open render follow-ups: a concurrency limit (renders encode in parallel today), a proper caption renderer with text shaping for non-Latin scripts, and cancelling a render.
 
 Later: live progress streaming (SSE).
