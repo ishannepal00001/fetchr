@@ -1,4 +1,8 @@
-"""Download(SQLModel, table=True): one row per URL a client asked us to fetch."""
+"""
+Download(SQLModel, table=True): one row per job a client asked for. Usually a URL to
+fetch; a render (clips cut from a video already in B2) is the same row with render_spec
+set, so both share the status lifecycle, cancel/restart handling and upload pipeline.
+"""
 
 import uuid
 from datetime import UTC, datetime
@@ -35,6 +39,7 @@ class Download(SQLModel, table=True):
     client_id: str = Field(index=True)  # who requested it
     source_url: str
     format: str | None = None  # yt-dlp format selector; None = yt-dlp default
+    render_spec: str | None = None  # JSON RenderSpec for a render job (source_url is then its B2 key); None = a download
     status: DownloadStatus = Field(default=DownloadStatus.QUEUED)
 
     # Filled in once yt-dlp has fetched the file.
@@ -46,7 +51,7 @@ class Download(SQLModel, table=True):
 
     # Set only once the upload has been verified.
     b2_bucket: str | None = None
-    b2_key: str | None = None  # downloads/<client_id>/<id>/<filename>
+    b2_key: str | None = None  # downloads/<client_id>/<id>/<filename> (renders/... for a render)
     thumbnail: str | None = None  # bare name (thumbnail.jpg), next to the video in B2; None if none could be made
 
     error: str | None = None  # set when status == failed

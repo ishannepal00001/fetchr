@@ -1,6 +1,6 @@
 # fetchr
 
-A small self-hosted media downloader API. A client sends a URL (mostly Facebook in v1). fetchr downloads it with **yt-dlp**, uploads it to **Backblaze B2**, checks that the upload arrived intact, and records it in a **SQLite** database. Every request is authenticated with a **rolling one-time code**.
+A small self-hosted media downloader API. A client sends a URL (mostly Facebook in v1). fetchr downloads it with **yt-dlp**, uploads it to **Backblaze B2**, checks that the upload arrived intact, and records it in a **SQLite** database. It can also **render** a video already in B2: cut clips from it, join them into one MP4, burn in a news-style caption with **ffmpeg**, and upload the result. Every request is authenticated with a **rolling one-time code**.
 
 > Status: **Stages 1–4 done**. The API works end to end (auth, downloads, B2); deployment to Render is next. See [Roadmap](#roadmap).
 
@@ -53,6 +53,25 @@ Either way the output is a JPEG scaled to 640px wide keeping the aspect ratio (`
 
 **A thumbnail never fails a download.** Any error (no poster and an unreadable video, ffmpeg error, upload error) is logged as a warning, any partial thumbnail object is deleted, and the download completes with `thumbnail: null`.
 
+### Renders
+A render takes one video the client already downloaded (in B2 under `downloads/<client_id>/…`), cuts clips from it, joins them in the requested order into **one MP4**, optionally burns a caption into it, and uploads the result to `renders/<client_id>/<id>/clip.mp4`.
+
+A render is a download row with a render spec attached, so it runs through the same job: the same `BackgroundTasks` worker, the same statuses, thumbnail, upload, verify and retry steps, and the same handling of jobs cut off by a restart (marked `failed`). Only the `downloading` step differs: instead of yt-dlp, it fetches the source from B2 into `tmp/<id>/` and renders it there. Renders and downloads never show up in each other's endpoints.
+
+1. **Fetch** `source_key` from B2 into `tmp/<id>/` (status `downloading`).
+2. **ffprobe** it for the duration, display size (rotation metadata applied), and whether it has audio. Any clip ending more than 0.1s after the video's end fails the job with `Clip ends after the video does`.
+3. **Caption** (if any): drawn as a transparent PNG as wide as the video. A red bar holds the headline in bold white, and a translucent black bar below holds the details (line breaks kept). Font sizes scale with the video width. If the caption would cover more than half the frame, the fonts shrink, and as a last resort trailing detail lines are cut with `…`.
+4. **One ffmpeg run**, re-encoded so every cut is frame accurate (no stream copy):
+   - each clip is read as its own input (`-ss`/`-t`, so ffmpeg seeks instead of decoding from the start), then `trim`/`atrim` + `setpts`/`asetpts=PTS-STARTPTS`
+   - a source without audio gets silence (`anullsrc`) per clip, so the output always has an audio track
+   - `concat` in request order; odd dimensions are cropped down to even
+   - the caption is overlaid at the bottom (`overlay=0:H-h`) from the **start of the output** (not each clip), fully visible for `hold` seconds, then its alpha fades out over `fade` seconds
+   - `libx264 -preset veryfast -crf 20 -pix_fmt yuv420p`, AAC 160k, `-movflags +faststart`, at the source's resolution
+5. **Thumbnail**: the output's first frame, as `thumbnail.jpg` (640px wide, best effort as for downloads).
+6. **Upload + verify** both, as for downloads, then `completed`.
+
+`tmp/<id>/` is deleted whatever the outcome (unlike a download, the source is still in B2, so nothing is lost). On failure, `error` is a short message such as `Clip ends after the video does`, `Source video not found`, `The source isn't a readable video` or `ffmpeg could not render the video`. The ffmpeg command and the tail of its stderr go to the log. A single ffmpeg run is killed after `FETCHR_RENDER_TIMEOUT_SECONDS`.
+
 ---
 
 ## Project layout
@@ -66,18 +85,23 @@ app/
 │   ├── security.py          generate / hash codes
 │   ├── downloader.py        yt-dlp wrapper (implements the downloads Downloader protocol)
 │   ├── thumbnails.py        ffmpeg thumbnailer: poster or video frame → 640px JPEG
+│   ├── renderer.py          ffmpeg renderer: clips → one captioned MP4 (implements Renderer)
+│   ├── captions.py          caption layout + drawtext → transparent PNG
 │   └── storage.py           Backblaze B2: upload, verify, presigned URL, delete
 ├── middlewares/
 │   └── auth.py              RollingCodeMiddleware → modules/auth/services
 ├── modules/                 domain layer: model.py (DB tables) + services.py (logic)
 │   ├── auth/                ClientCredential, seed / verify_and_rotate / reset
-│   └── downloads/           Download, create / get / list / process_download
+│   └── downloads/           Download, create / get / list / process_download, create_render / get_render
 └── api/                     HTTP layer, versioned: schemas.py + router.py only
     ├── deps.py              session, current_client_id
     └── v1/
         ├── router.py        mounts feature routers under /api/v1
-        └── downloads/
-            ├── schemas.py   request/response validation
+        ├── downloads/
+        │   ├── schemas.py   request/response validation
+        │   └── router.py    endpoints
+        └── renders/
+            ├── schemas.py   render request validation (responses reuse the download schema)
             └── router.py    endpoints
 tests/                       mirrors app/: middlewares/, modules/, api/v1/
 tmp/                         yt-dlp scratch space (gitignored)
@@ -99,6 +123,8 @@ tmp/                         yt-dlp scratch space (gitignored)
 | GET | `/api/v1/downloads/{id}` | status + metadata |
 | GET | `/api/v1/downloads/{id}/file` | presigned B2 link (`?redirect=true` → 307) |
 | POST | `/api/v1/downloads/{id}/cancel` | stop a queued or running download |
+| POST | `/api/v1/renders` | `{source_key, clips, caption?}` → create a render and start processing (202) |
+| GET | `/api/v1/renders/{id}` | status + metadata of a render |
 | GET | `/health` | liveness, no auth |
 
 Every endpoint except `/health` and the docs requires `X-Client-Id` + `X-Fetchr-Code`.
@@ -166,6 +192,50 @@ A download row is both the job and its result, so its fields fill in at differen
 
 `POST` returns the row as it was inserted: `status: "queued"` and every result field `null`. Poll `GET /api/v1/downloads/{id}` until `status` is `completed`, `failed` or `cancelled`. A cancelled download has `error: null`; any result fields already filled in stay as they were.
 
+### Request: `POST /api/v1/renders`
+
+```json
+{
+  "source_key": "downloads/my-client/3f6c2a1e-…/1234567890.mp4",
+  "clips": [ { "start": 12.4, "end": 31.0 }, { "start": 2, "end": 5.5 } ],
+  "caption": {
+    "headline": "Flood waters recede in Kathmandu",
+    "details": "Officials say 1,200 families were moved.\nRoads reopen Monday.",
+    "hold": 6,
+    "fade": 1.5
+  }
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `source_key` | string, required | B2 key of one of **your** downloads: must start with `downloads/<your client id>/` (no `.`, `..` or empty path segments) |
+| `clips` | list, 1–20 items | in output order. Clips may overlap |
+| `clips[].start` | number | seconds into the source, ≥ 0 |
+| `clips[].end` | number | seconds into the source, at least 0.5 after `start`, and at most 0.1s past the source's end (checked once the job has the file) |
+| `caption` | object \| null | optional; `null` or missing = no caption. One caption for the whole output, shown from its start |
+| `caption.headline` | string, 1–200 chars | not blank |
+| `caption.details` | string, 1–600 chars | may contain `\n` |
+| `caption.hold` | number, 0–600, default `6` | seconds fully visible |
+| `caption.fade` | number, 0–60, default `1.5` | seconds to fade out after `hold`. `hold + fade` must be > 0 |
+
+The clips may add up to at most `FETCHR_RENDER_MAX_SECONDS` (default 600) seconds of output.
+
+### Response: a render
+
+`POST /api/v1/renders` (202) and `GET /api/v1/renders/{id}` (200) return a render in **exactly the shape of a download** (see above), so the same parsing works:
+
+| Field | For a render |
+|---|---|
+| `source_url` | the `source_key` |
+| `status` | `queued` → `downloading` (fetching the source and rendering) → `uploading` → `verifying` → `completed` \| `failed` |
+| `title` | `null` |
+| `filename`, `content_type`, `filesize` | `"clip.mp4"`, `"video/mp4"`, bytes, once rendered |
+| `thumbnail` | `"thumbnail.jpg"` (the output's first frame) on `completed`, else `null` |
+| `error` | on `failed`, a short message such as `"Clip ends after the video does"` |
+
+The output is at `renders/<client_id>/<id>/clip.mp4` in B2, with the thumbnail next to it. Renders don't appear in `GET /api/v1/downloads`, and the download endpoints answer `404` for a render id (and vice versa).
+
 ### Request: `POST /api/v1/downloads/{id}/cancel`
 
 No body. Returns the download (200) with `status: "cancelled"`. Cancelling an already cancelled download returns it again (200); a `completed` or `failed` one gets `409`.
@@ -202,10 +272,11 @@ With `?redirect=true` you get a `307` to that URL instead, with no body.
 | Status | Body | When |
 |---|---|---|
 | `401` | `{"detail": "unauthorized"}` | missing headers or wrong code. The endpoint never ran and the code didn't rotate |
-| `404` | `{"detail": "download not found"}` | no such id, or it belongs to another client |
+| `404` | `{"detail": "download not found"}` / `{"detail": "render not found"}` | no such id, or it belongs to another client |
 | `409` | `{"detail": "download not completed yet"}` | `/file` asked for a download that isn't `completed` |
 | `409` | `{"detail": "download already finished"}` | `/cancel` on a download that is `completed` or `failed` |
 | `422` | FastAPI's `{"detail": [ … ]}` | invalid body, query parameter, or id (not a UUID) |
+| `422` | `{"detail": "<message>"}` | a render whose `source_key` isn't one of your downloads, or whose clips add up to more than `FETCHR_RENDER_MAX_SECONDS` |
 | `500` | `{"detail": "internal server error"}` | an unexpected failure (e.g. the database or disk). Still carries `X-Fetchr-Next-Code` |
 
 ---
@@ -215,9 +286,13 @@ Copy `.env.example` to `.env` and fill it in. Key values:
 - `FETCHR_CLIENT_ID` and `FETCHR_SEED_CODE`: the hardcoded first credential.
 - `B2_*`: Backblaze B2 S3-compatible endpoint, key, and bucket.
 - `FETCHR_COOKIES_FILE`: optional, for Facebook videos that need login.
+- `FETCHR_FFMPEG_PATH`, `FETCHR_FFPROBE_PATH`: the ffmpeg binaries, used for thumbnails and renders (default `ffmpeg` / `ffprobe` on the `PATH`).
+- `FETCHR_RENDER_MAX_SECONDS`: the most output a render may ask for, as the sum of its clip lengths (default `600`).
+- `FETCHR_RENDER_TIMEOUT_SECONDS`: a single ffmpeg render is killed after this long (default `1800`).
+- `FETCHR_CAPTION_FONT`, `FETCHR_CAPTION_BOLD_FONT`: caption fonts, each a font file path or a fontconfig pattern (default `Sans` / `Sans:bold`; the image ships DejaVu Sans). Text layout assumes a Latin sans font, so scripts that need shaping (e.g. Devanagari) won't render correctly with ffmpeg 5.1's drawtext.
 
 ## Running
-Runs in Docker; the image includes **ffmpeg**, which yt-dlp uses to merge Facebook's separate video and audio streams.
+Runs in Docker; the image includes **ffmpeg**, which yt-dlp uses to merge Facebook's separate video and audio streams and renders use to cut, join and caption, plus the DejaVu fonts for captions.
 
 ```bash
 cp .env.example .env          # fill in FETCHR_SEED_CODE and the B2_* values
