@@ -41,9 +41,6 @@ class Settings(BaseSettings):
     # --- Renders ---
     render_max_seconds: float = Field(default=600, gt=0)  # total output length a render may ask for
     render_timeout_seconds: int = Field(default=1800, gt=0)  # one ffmpeg render run, then it is killed
-    # drawtext fonts for captions: a font file path or a fontconfig pattern
-    caption_font: str = "Sans"
-    caption_bold_font: str = "Sans:bold"
 
     # --- Backblaze B2 (no FETCHR_ prefix, matching .env.example) ---
     b2_endpoint_url: str = Field(validation_alias=AliasChoices("B2_ENDPOINT_URL", "b2_endpoint_url"))

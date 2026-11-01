@@ -64,7 +64,7 @@ A render is a download row with a render spec attached, so it runs through the s
 
 1. **Fetch** `source_key` from B2 into `tmp/<id>/` (status `downloading`).
 2. **ffprobe** it for the duration, display size (rotation metadata applied), and whether it has audio. Any clip ending more than 0.1s after the video's end fails the job with `Clip ends after the video does`.
-3. **Caption** (if any): drawn as a transparent PNG as wide as the video. A red bar holds the headline in bold white, and a translucent black bar below holds the details (line breaks kept). Font sizes scale with the video width. If the caption would cover more than half the frame, the fonts shrink, and as a last resort trailing detail lines are cut with `…`.
+3. **Caption** (if any): drawn with Pillow as a transparent PNG as wide as the video, matching Bhandar's editor preview. A full-width panel (black at 60%) holds the headline in Montserrat ExtraBold, navy on a gold bar per wrapped line (each bar as wide as its line, with a soft shadow), and below it the details in Montserrat Bold, cream with a soft shadow, line breaks kept. Everything is centred, and every size is a fraction of the video width. Nepali is drawn in Noto Sans Devanagari and shaped with libraqm, so conjuncts and vowel signs join correctly, and mixed Latin and Nepali lines switch font per run. The text is never cut: if the caption would cover more than half the frame, everything shrinks together until it fits.
 4. **One ffmpeg run**, re-encoded so every cut is frame accurate (no stream copy):
    - each clip is read as its own input (`-ss`/`-t`, so ffmpeg seeks instead of decoding from the start), then `trim`/`atrim` + `setpts`/`asetpts=PTS-STARTPTS`
    - a source without audio gets silence (`anullsrc`) per clip, so the output always has an audio track
@@ -90,7 +90,8 @@ app/
 │   ├── downloader.py        yt-dlp wrapper (implements the downloads Downloader protocol)
 │   ├── thumbnails.py        ffmpeg thumbnailer: poster or video frame → 640px JPEG
 │   ├── renderer.py          ffmpeg renderer: clips → one captioned MP4 (implements Renderer)
-│   ├── captions.py          caption layout + drawtext → transparent PNG
+│   ├── captions.py          caption layout + Pillow/raqm drawing → transparent PNG
+│   ├── fonts/               Montserrat and Noto Sans Devanagari (SIL OFL) for captions
 │   └── storage.py           Backblaze B2: upload, verify, presigned URL, delete
 ├── middlewares/
 │   └── auth.py              RollingCodeMiddleware → modules/auth/services
@@ -293,10 +294,9 @@ Copy `.env.example` to `.env` and fill it in. Key values:
 - `FETCHR_FFMPEG_PATH`, `FETCHR_FFPROBE_PATH`: the ffmpeg binaries, used for thumbnails and renders (default `ffmpeg` / `ffprobe` on the `PATH`).
 - `FETCHR_RENDER_MAX_SECONDS`: the most output a render may ask for, as the sum of its clip lengths (default `600`).
 - `FETCHR_RENDER_TIMEOUT_SECONDS`: a single ffmpeg render is killed after this long (default `1800`).
-- `FETCHR_CAPTION_FONT`, `FETCHR_CAPTION_BOLD_FONT`: caption fonts, each a font file path or a fontconfig pattern (default `Sans` / `Sans:bold`; the image ships DejaVu Sans). Text layout assumes a Latin sans font, so scripts that need shaping (e.g. Devanagari) won't render correctly with ffmpeg 5.1's drawtext.
 
 ## Running
-Runs in Docker; the image includes **ffmpeg**, which yt-dlp uses to merge Facebook's separate video and audio streams and renders use to cut, join and caption, plus the DejaVu fonts for captions.
+Runs in Docker; the image includes **ffmpeg**, which yt-dlp uses to merge Facebook's separate video and audio streams and renders use to cut and join. Caption fonts ship in `app/core/fonts`, and Pillow's wheel bundles libraqm for text shaping; fetchr refuses to start if raqm is missing.
 
 ```bash
 cp .env.example .env          # fill in FETCHR_SEED_CODE and the B2_* values

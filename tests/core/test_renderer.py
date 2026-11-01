@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from app.core.captions import FfmpegCaptioner
+from app.core.captions import PillowCaptioner
 from app.core.renderer import FfmpegRenderer, Probe
 from app.modules.downloads.services import Caption, Clip, RenderFailed, RenderSpec
 
@@ -76,7 +76,7 @@ def out_dir(tmp_path) -> Path:
 
 @pytest.fixture
 def renderer() -> FfmpegRenderer:
-    return FfmpegRenderer(FfmpegCaptioner())
+    return FfmpegRenderer(PillowCaptioner())
 
 
 def spec(*clips: tuple[float, float], caption: Caption | None = None) -> RenderSpec:
@@ -234,7 +234,7 @@ def test_caption_failure_fails_the_render(source, out_dir):
 
 
 def test_ffmpeg_and_ffprobe_paths_are_configurable(source, out_dir):
-    renderer = FfmpegRenderer(FfmpegCaptioner(), ffmpeg="/nonexistent/ffmpeg", ffprobe="/nonexistent/ffprobe")
+    renderer = FfmpegRenderer(PillowCaptioner(), ffmpeg="/nonexistent/ffmpeg", ffprobe="/nonexistent/ffprobe")
 
     with pytest.raises(RenderFailed):
         renderer.render(source, spec((0, 1)), out_dir)
@@ -244,7 +244,7 @@ def test_ffmpeg_and_ffprobe_paths_are_configurable(source, out_dir):
 
 
 def test_command_shape():
-    renderer = FfmpegRenderer(FfmpegCaptioner())
+    renderer = FfmpegRenderer(PillowCaptioner())
     caption = Caption("Headline", "Details", hold=6, fade=1.5)
     command = renderer.command(
         Path("src.mp4"), spec((12.4, 31), (1, 2.5), caption=caption), Probe(60, 1280, 720, False), Path("cap.png"), Path("out.mp4")

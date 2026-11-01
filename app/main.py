@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.v1.router import api_router
-from app.core.captions import FfmpegCaptioner
+from app.core.captions import PillowCaptioner
 from app.core.config import Settings, get_settings
 from app.core.database import create_db_and_tables, make_engine, make_session_factory
 from app.core.downloader import YtDlpDownloader
@@ -45,9 +45,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         upload_retries=settings.upload_retries,
         thumbnailer=FfmpegThumbnailer(ffmpeg=settings.ffmpeg_path),
         renderer=FfmpegRenderer(
-            captioner=FfmpegCaptioner(
-                ffmpeg=settings.ffmpeg_path, font=settings.caption_font, bold_font=settings.caption_bold_font
-            ),
+            captioner=PillowCaptioner(),
             ffmpeg=settings.ffmpeg_path,
             ffprobe=settings.ffprobe_path,
             timeout=settings.render_timeout_seconds,
