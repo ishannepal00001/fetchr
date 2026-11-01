@@ -1,6 +1,8 @@
 """core/storage tests against moto's fake S3, standing in for Backblaze B2."""
 
 import hashlib
+import shutil
+import subprocess
 from urllib.parse import parse_qs, urlparse
 
 import boto3
@@ -84,6 +86,26 @@ def test_upload_completes_while_should_stop_is_false(storage, video):
     assert storage.verify_upload(KEY, len(DATA), SHA) is True
 
 
+def test_download_file_fetches_the_object(storage, video, tmp_path):
+    storage.upload_file(video, KEY, SHA, "video/mp4")
+
+    storage.download_file(KEY, tmp_path / "copy.mp4", should_stop=lambda: False)
+
+    assert (tmp_path / "copy.mp4").read_bytes() == DATA
+
+
+def test_download_file_missing_key_raises_file_not_found(storage, tmp_path):
+    with pytest.raises(FileNotFoundError):
+        storage.download_file("downloads/alice/nope/video.mp4", tmp_path / "copy.mp4")
+
+
+def test_download_file_aborts_when_should_stop_turns_true(storage, video, tmp_path):
+    storage.upload_file(video, KEY, SHA, "video/mp4")
+
+    with pytest.raises(UploadStopped):
+        storage.download_file(KEY, tmp_path / "copy.mp4", should_stop=lambda: True)
+
+
 def test_verify_passes_after_upload(storage, video):
     storage.upload_file(video, KEY, SHA, "video/mp4")
 
@@ -165,3 +187,43 @@ def test_download_service_end_to_end_with_b2_storage(storage, s3, session_factor
     assert s3.get_object(Bucket=BUCKET, Key=download.b2_key)["Body"].read() == DATA
     assert not (tmp_path / "tmp" / str(created.id)).exists()
     assert download.b2_key in service.file_link("alice", created.id)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="needs ffmpeg")
+def test_render_end_to_end_with_b2_storage_and_ffmpeg(storage, s3, session_factory, tmp_path):
+    """A real source video in B2 (moto), the real ffmpeg renderer and thumbnailer, through DownloadService."""
+    from app.core.captions import FfmpegCaptioner
+    from app.core.renderer import FfmpegRenderer
+    from app.core.thumbnails import FfmpegThumbnailer
+    from app.modules.downloads.model import DownloadStatus
+    from app.modules.downloads.services import Caption, Clip, DownloadService, RenderSpec
+
+    source = tmp_path / "source.mp4"
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=160x120:duration=4:rate=25",
+         "-f", "lavfi", "-i", "sine=duration=4", "-pix_fmt", "yuv420p", "-shortest", str(source)],
+        check=True,
+    )
+    source_key = "downloads/alice/abc/source.mp4"
+    s3.upload_file(str(source), BUCKET, source_key)
+    service = DownloadService(
+        session_factory,
+        None,
+        storage,
+        tmp_path / "tmp",
+        thumbnailer=FfmpegThumbnailer(),
+        renderer=FfmpegRenderer(FfmpegCaptioner()),
+    )
+    spec = RenderSpec(clips=(Clip(2, 3), Clip(0, 1)), caption=Caption("Headline", "Details"))
+    created = service.create_render("alice", source_key, spec)
+
+    service.process_download(created.id)
+
+    render = service.get_render("alice", created.id)
+    assert render.status == DownloadStatus.COMPLETED, render.error
+    prefix = f"renders/alice/{created.id}/"
+    keys = {o["Key"] for o in s3.list_objects_v2(Bucket=BUCKET, Prefix="renders/")["Contents"]}
+    assert keys == {prefix + "clip.mp4", prefix + "thumbnail.jpg"}
+    assert s3.head_object(Bucket=BUCKET, Key=prefix + "clip.mp4")["ContentLength"] == render.filesize
+    assert s3.head_object(Bucket=BUCKET, Key=prefix + "thumbnail.jpg")["ContentType"] == "image/jpeg"
+    assert not (tmp_path / "tmp" / str(created.id)).exists()

@@ -44,6 +44,28 @@ def test_defaults(env):
     assert settings.tmp_dir == Path("./tmp")
     assert settings.upload_retries == 3
     assert settings.cookies_file is None
+    assert (settings.ffmpeg_path, settings.ffprobe_path) == ("ffmpeg", "ffprobe")
+    assert settings.render_max_seconds == 600
+    assert settings.render_timeout_seconds == 1800
+    assert (settings.caption_font, settings.caption_bold_font) == ("Sans", "Sans:bold")
+
+
+def test_reads_ffmpeg_and_render_variables(env):
+    env.setenv("FETCHR_FFMPEG_PATH", "/opt/ffmpeg/bin/ffmpeg")
+    env.setenv("FETCHR_FFPROBE_PATH", "/opt/ffmpeg/bin/ffprobe")
+    env.setenv("FETCHR_RENDER_MAX_SECONDS", "120.5")
+    env.setenv("FETCHR_RENDER_TIMEOUT_SECONDS", "300")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.ffmpeg_path == "/opt/ffmpeg/bin/ffmpeg"
+    assert settings.ffprobe_path == "/opt/ffmpeg/bin/ffprobe"
+    assert settings.render_max_seconds == 120.5
+    assert settings.render_timeout_seconds == 300
+
+    env.setenv("FETCHR_RENDER_MAX_SECONDS", "0")
+    with pytest.raises(ValidationError, match="render_max_seconds"):
+        Settings(_env_file=None)
 
 
 def test_empty_cookies_file_means_none(env):

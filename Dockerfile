@@ -4,7 +4,8 @@
 #
 # Two stages: uv installs the locked deps into /app/.venv, then only that venv and
 # the app code are copied into a slim runtime image with ffmpeg (yt-dlp merges
-# video + audio with it). Secrets come from the environment, never the image.
+# video + audio with it, and renders cut, join and caption videos with it; captions
+# need a font). Secrets come from the environment, never the image.
 
 FROM python:3.13-slim-bookworm AS builder
 COPY --from=ghcr.io/astral-sh/uv:0.8.15 /uv /usr/local/bin/uv
@@ -23,7 +24,7 @@ RUN uv sync --frozen --no-dev
 
 FROM python:3.13-slim-bookworm
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 fetchr
 

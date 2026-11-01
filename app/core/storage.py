@@ -18,7 +18,7 @@ DEFAULT_REGION = "us-east-1"
 
 
 class UploadStopped(Exception):
-    """should_stop() turned true, so the upload was aborted part way."""
+    """should_stop() turned true, so the upload (or a download_file) was aborted part way."""
 
 
 def region_from_endpoint(endpoint_url: str) -> str:
@@ -85,6 +85,26 @@ class B2Storage:
             },
             Callback=stop_callback if should_stop else None,
         )
+
+    def download_file(self, key: str, local_path: Path, should_stop: StopCheck | None = None) -> None:
+        """
+        Fetch `key` (a render's source video) to local_path. Raises FileNotFoundError if
+        there is no such object, the boto error otherwise. Like upload_file, raising in
+        Callback aborts the transfer; the caller deletes the partial file.
+        """
+
+        def stop_callback(_bytes_received: int) -> None:
+            if should_stop():
+                raise UploadStopped("stopped on request")
+
+        try:
+            self._client.download_file(
+                self.bucket, key, str(local_path), Callback=stop_callback if should_stop else None
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
+                raise FileNotFoundError(key) from exc
+            raise
 
     def verify_upload(self, key: str, expected_size: int, expected_sha256: str) -> bool:
         """

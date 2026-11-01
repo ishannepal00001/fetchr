@@ -12,10 +12,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.v1.router import api_router
+from app.core.captions import FfmpegCaptioner
 from app.core.config import Settings, get_settings
 from app.core.database import create_db_and_tables, make_engine, make_session_factory
 from app.core.downloader import YtDlpDownloader
+from app.core.renderer import FfmpegRenderer
 from app.core.storage import B2Storage
+from app.core.thumbnails import FfmpegThumbnailer
 from app.middlewares.auth import RollingCodeMiddleware
 from app.modules.auth.services import AuthService
 from app.modules.downloads.services import DownloadService
@@ -40,6 +43,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         storage=storage,
         tmp_dir=settings.tmp_dir,
         upload_retries=settings.upload_retries,
+        thumbnailer=FfmpegThumbnailer(ffmpeg=settings.ffmpeg_path),
+        renderer=FfmpegRenderer(
+            captioner=FfmpegCaptioner(
+                ffmpeg=settings.ffmpeg_path, font=settings.caption_font, bold_font=settings.caption_bold_font
+            ),
+            ffmpeg=settings.ffmpeg_path,
+            ffprobe=settings.ffprobe_path,
+            timeout=settings.render_timeout_seconds,
+        ),
+        render_max_seconds=settings.render_max_seconds,
     )
 
     @asynccontextmanager

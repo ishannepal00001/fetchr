@@ -34,6 +34,7 @@ class DownloadRead(BaseModel):
     filename: str | None
     content_type: str | None
     filesize: int | None
+    thumbnail: str | None  # bare file name at downloads/<client_id>/<id>/<thumbnail> in B2; set on completion
     error: str | None
     created_at: datetime
     updated_at: datetime

@@ -13,7 +13,22 @@ from app.api.deps import get_downloads
 from app.core.config import Settings
 from app.main import create_app
 from app.middlewares.auth import NEXT_CODE_HEADER
+from app.modules.downloads.model import Download, DownloadStatus
 from app.modules.downloads.services import DownloadService, FetchedMedia
+
+DOWNLOAD_FIELDS = {
+    "id",
+    "source_url",
+    "status",
+    "title",
+    "filename",
+    "content_type",
+    "filesize",
+    "thumbnail",
+    "error",
+    "created_at",
+    "updated_at",
+}
 
 
 class FakeDownloader:
@@ -46,6 +61,18 @@ class FakeStorage:
 
     def delete_object(self, key):
         self.objects.pop(key, None)
+
+
+class FakeThumbnailer:
+    def __init__(self) -> None:
+        self.fail = False
+
+    def make(self, video, poster, out_dir):
+        if self.fail:
+            raise RuntimeError("ffmpeg failed")
+        path = out_dir / "thumbnail.jpg"
+        path.write_bytes(b"jpeg")
+        return path
 
 
 class CodeClient:
@@ -86,8 +113,13 @@ def app(tmp_path):
     )
     app = create_app(settings)
     app.state.fake_downloader = FakeDownloader()
+    app.state.fake_thumbnailer = FakeThumbnailer()
     service = DownloadService(
-        app.state.session_factory, app.state.fake_downloader, FakeStorage(), settings.tmp_dir
+        app.state.session_factory,
+        app.state.fake_downloader,
+        FakeStorage(),
+        settings.tmp_dir,
+        thumbnailer=app.state.fake_thumbnailer,
     )
     app.dependency_overrides[get_downloads] = lambda: service
     app.state.test_service = service
@@ -132,6 +164,49 @@ def test_post_queues_and_background_task_completes(alice):
     assert detail["title"] == "A video"
     assert detail["filename"] == "123.mp4"
     assert detail["filesize"] == 5
+    assert detail["thumbnail"] == "thumbnail.jpg"
+
+
+def test_post_returns_the_full_shape_with_thumbnail_null(alice):
+    body = alice.post("/api/v1/downloads", json={"url": "https://facebook.com/watch?v=123"}).json()
+
+    assert set(body) == DOWNLOAD_FIELDS | {"next_code"}
+    assert body["thumbnail"] is None
+
+
+@pytest.mark.parametrize("status", list(DownloadStatus))
+def test_every_status_returns_the_same_shape_including_thumbnail(alice, app, status):
+    queued = app.state.test_service.create_download("alice", "https://facebook.com/watch?v=9")  # never processed
+    with app.state.session_factory() as session:
+        row = session.get(Download, queued.id)
+        row.status = status
+        session.add(row)
+        session.commit()
+
+    body = alice.get(f"/api/v1/downloads/{queued.id}").json()
+    listed = alice.get("/api/v1/downloads").json()["items"][0]
+
+    assert body["status"] == status.value
+    assert set(body) == DOWNLOAD_FIELDS | {"next_code"}
+    assert set(listed) == DOWNLOAD_FIELDS
+    assert body["thumbnail"] is None
+
+
+def test_thumbnail_failure_still_completes_with_null_thumbnail(alice, app):
+    app.state.fake_thumbnailer.fail = True
+
+    detail = alice.get(f"/api/v1/downloads/{create(alice)['id']}").json()
+
+    assert detail["status"] == "completed"
+    assert detail["thumbnail"] is None
+    assert detail["error"] is None
+
+
+def test_failed_and_cancelled_downloads_have_no_thumbnail(alice, app):
+    queued = app.state.test_service.create_download("alice", "https://facebook.com/watch?v=9")
+    assert alice.post(f"/api/v1/downloads/{queued.id}/cancel").json()["thumbnail"] is None
+    app.state.fake_downloader.fail = True
+    assert alice.get(f"/api/v1/downloads/{create(alice)['id']}").json()["thumbnail"] is None
 
 
 def test_internal_fields_are_not_exposed(alice):

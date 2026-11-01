@@ -6,7 +6,7 @@ passes the URL in, and tests pass an in-memory one.
 from collections.abc import Callable
 from typing import Any
 
-from sqlalchemy import event
+from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -43,6 +43,23 @@ def make_engine(url: str, **kwargs: Any) -> Engine:
 
 def create_db_and_tables(engine: Engine) -> None:
     SQLModel.metadata.create_all(engine)
+    _add_missing_columns(engine)
+
+
+def _add_missing_columns(engine: Engine) -> None:
+    """
+    create_all() makes missing tables but never alters existing ones, so a DB kept in a
+    volume from before a new nullable column (e.g. download.thumbnail) would break every
+    query. Add such columns in place; old rows get NULL. Not a substitute for real migrations.
+    """
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        for table in SQLModel.metadata.sorted_tables:
+            existing = {column["name"] for column in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name not in existing and column.nullable:
+                    column_type = column.type.compile(engine.dialect)
+                    conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {column_type}'))
 
 
 def make_session_factory(engine: Engine) -> SessionFactory:

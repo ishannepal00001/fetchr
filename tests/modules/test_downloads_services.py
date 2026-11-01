@@ -1,5 +1,6 @@
 """modules/downloads/services tests, using a fake downloader and fake storage."""
 
+import logging
 import uuid
 from pathlib import Path
 
@@ -69,7 +70,23 @@ class FakeStorage:
         self.objects.pop(key, None)
 
 
-def make_service(session_factory, tmp_path, downloader=None, storage=None, retries=3):
+class FakeThumbnailer:
+    """Writes a fake JPEG, or raises like ffmpeg failing on both the poster and the video."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[tuple[Path, Path | None, Path]] = []
+
+    def make(self, video: Path, poster: Path | None, out_dir: Path) -> Path:
+        self.calls.append((video, poster, out_dir))
+        if self.fail:
+            raise RuntimeError("ffmpeg failed on video.mp4: Invalid data found")
+        path = out_dir / "thumbnail.jpg"
+        path.write_bytes(b"fake jpeg")
+        return path
+
+
+def make_service(session_factory, tmp_path, downloader=None, storage=None, retries=3, thumbnailer=None):
     return DownloadService(
         session_factory=session_factory,
         downloader=downloader or FakeDownloader(),
@@ -77,6 +94,7 @@ def make_service(session_factory, tmp_path, downloader=None, storage=None, retri
         tmp_dir=tmp_path,
         upload_retries=retries,
         stop_check_interval=0,  # read the DB on every check, so tests see a cancel at once
+        thumbnailer=thumbnailer,
     )
 
 
@@ -286,3 +304,134 @@ def test_should_stop_reads_db_at_most_once_per_interval(session_factory, tmp_pat
     assert should_stop() is False  # inside the interval: cached answer
 
     assert service._stop_check(created.id)() is True  # a fresh check sees the cancel
+
+
+class PosterDownloader(FakeDownloader):
+    """Like yt-dlp with writethumbnail: the poster lands next to the video."""
+
+    def download(self, url, dest_dir, format=None, should_stop=None):
+        media = super().download(url, dest_dir, format, should_stop)
+        poster = dest_dir / "video.webp"
+        poster.write_bytes(b"poster")
+        return FetchedMedia(path=media.path, title=media.title, content_type=media.content_type, poster=poster)
+
+
+def test_thumbnail_is_made_from_the_poster_and_uploaded_next_to_the_video(session_factory, tmp_path):
+    storage = FakeStorage()
+    thumbnailer = FakeThumbnailer()
+    service = make_service(
+        session_factory, tmp_path, downloader=PosterDownloader(), storage=storage, thumbnailer=thumbnailer
+    )
+    created = service.create_download("alice", "https://facebook.com/watch?v=1")
+
+    service.process_download(created.id)
+
+    download = service.get_download("alice", created.id)
+    assert download.status == DownloadStatus.COMPLETED
+    assert download.thumbnail == "thumbnail.jpg"
+    assert set(storage.objects) == {
+        f"downloads/alice/{created.id}/video.mp4",
+        f"downloads/alice/{created.id}/thumbnail.jpg",
+    }
+    work_dir = tmp_path / str(created.id)
+    [(video, poster, out_dir)] = thumbnailer.calls
+    assert (video, poster) == (work_dir / "video.mp4", work_dir / "video.webp")
+    assert out_dir.parent == work_dir  # a temp dir inside the writable tmp dir, not /app
+    assert not work_dir.exists()
+
+
+def test_without_a_poster_the_thumbnailer_gets_none_to_fall_back_on_ffmpeg(session_factory, tmp_path):
+    thumbnailer = FakeThumbnailer()
+    service = make_service(session_factory, tmp_path, thumbnailer=thumbnailer)
+    created = service.create_download("alice", "https://facebook.com/watch?v=1")
+
+    service.process_download(created.id)
+
+    assert thumbnailer.calls[0][1] is None
+    assert service.get_download("alice", created.id).thumbnail == "thumbnail.jpg"
+
+
+def test_thumbnail_is_null_until_completed(session_factory, tmp_path):
+    seen = []
+    holder = []
+    storage = FakeStorage()
+    service = make_service(session_factory, tmp_path, storage=storage, thumbnailer=FakeThumbnailer())
+    storage.during_verify = lambda: seen.append(service.get_download("alice", holder[0]).thumbnail)
+    holder.append(service.create_download("alice", "https://facebook.com/watch?v=1").id)
+
+    service.process_download(holder[0])
+
+    assert seen and set(seen) == {None}  # still null while verifying, even with the thumbnail already in B2
+    assert service.get_download("alice", holder[0]).thumbnail == "thumbnail.jpg"
+
+
+def test_thumbnail_failure_leaves_null_and_still_completes(session_factory, tmp_path, caplog):
+    storage = FakeStorage()
+    service = make_service(session_factory, tmp_path, storage=storage, thumbnailer=FakeThumbnailer(fail=True))
+    created = service.create_download("alice", "https://facebook.com/watch?v=1")
+
+    with caplog.at_level(logging.WARNING):
+        service.process_download(created.id)
+
+    download = service.get_download("alice", created.id)
+    assert download.status == DownloadStatus.COMPLETED
+    assert download.thumbnail is None
+    assert download.error is None
+    assert set(storage.objects) == {f"downloads/alice/{created.id}/video.mp4"}
+    assert "no thumbnail: ffmpeg failed" in caplog.text
+    assert not (tmp_path / str(created.id)).exists()
+
+
+class ThumbnailUploadFails(FakeStorage):
+    def upload_file(self, local_path, key, sha256, content_type, should_stop=None):
+        if key.endswith("thumbnail.jpg"):
+            self.objects[key] = (0, "partial")  # as if a PUT landed before the error
+            raise ConnectionError("B2 unreachable")
+        super().upload_file(local_path, key, sha256, content_type, should_stop)
+
+
+def test_thumbnail_upload_failure_leaves_null_and_removes_the_object(session_factory, tmp_path):
+    storage = ThumbnailUploadFails()
+    service = make_service(session_factory, tmp_path, storage=storage, thumbnailer=FakeThumbnailer())
+    created = service.create_download("alice", "https://facebook.com/watch?v=1")
+
+    service.process_download(created.id)
+
+    download = service.get_download("alice", created.id)
+    assert download.status == DownloadStatus.COMPLETED
+    assert download.thumbnail is None
+    assert set(storage.objects) == {f"downloads/alice/{created.id}/video.mp4"}
+
+
+def test_failed_video_upload_also_deletes_the_thumbnail(session_factory, tmp_path):
+    storage = FakeStorage(verify_ok=False)
+    service = make_service(session_factory, tmp_path, storage=storage, thumbnailer=FakeThumbnailer())
+    created = service.create_download("alice", "https://facebook.com/watch?v=1")
+
+    service.process_download(created.id)
+
+    download = service.get_download("alice", created.id)
+    assert download.status == DownloadStatus.FAILED
+    assert download.thumbnail is None
+    assert storage.objects == {}
+
+
+@pytest.mark.parametrize("stage", ["during_upload", "during_verify"])
+def test_cancel_after_thumbnail_upload_deletes_it_too(session_factory, tmp_path, stage):
+    holder = []
+    storage = FakeStorage()
+    service = make_service(session_factory, tmp_path, storage=storage, thumbnailer=FakeThumbnailer())
+    hook = cancel_hook(service, holder)
+    if stage == "during_upload":  # let the thumbnail (first upload) through, cancel during the video's
+        storage.during_upload = lambda: storage.upload_calls == 2 and hook()
+    else:
+        storage.during_verify = lambda: storage.upload_calls == 2 and hook()
+    holder.append(service.create_download("alice", "https://facebook.com/watch?v=1").id)
+
+    service.process_download(holder[0])
+
+    download = service.get_download("alice", holder[0])
+    assert download.status == DownloadStatus.CANCELLED
+    assert download.thumbnail is None
+    assert storage.objects == {}
+    assert not (tmp_path / str(holder[0])).exists()

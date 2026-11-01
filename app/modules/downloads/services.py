@@ -4,8 +4,9 @@ Download services. Framework agnostic: no HTTP, no FastAPI, no task runner.
 Everything the service needs is injected through the constructor:
 - session_factory: opens a DB session (each call uses its own, so process_download
   can run outside a request)
-- downloader / storage: anything matching the Downloader / Storage protocols below
-  (yt-dlp and Backblaze B2 in production, fakes in tests)
+- downloader / storage / thumbnailer: anything matching the protocols below
+  (yt-dlp, Backblaze B2 and ffmpeg in production, fakes in tests). The thumbnailer is
+  optional; without one, downloads simply have no thumbnail.
 - tmp_dir, upload_retries: plain config values
 
 process_download() is synchronous and blocking. The caller decides how to run it
@@ -15,23 +16,79 @@ Errors the caller should handle are raised as the domain exceptions below.
 Cancelling: cancel_download() only flips the row to cancelled. The worker notices it
 through `should_stop` (polled by the downloader and storage while they work) and
 through its own status writes, which only apply while the row is still active, so a
-cancel can't be overwritten. The worker then cleans up tmp/<id>/ and any B2 object.
+cancel can't be overwritten. The worker then cleans up tmp/<id>/ and any B2 objects.
+
+Thumbnails are best effort: any error making or uploading one is logged and the
+download completes with thumbnail = None.
+
+Renders reuse all of this. A render is a Download row with render_spec set: its
+"fetch" step pulls the source video from B2 and has the renderer cut, join and caption
+it, and everything after that (thumbnail, upload, verify, cancel, restart) is the
+download pipeline, writing under renders/ instead of downloads/. Renders and downloads
+never see each other: get/list/cancel/file_link only act on downloads, get_render
+only on renders.
 """
 
 import hashlib
+import json
+import logging
+import re
 import shutil
+import tempfile
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import asdict, dataclass
+from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from sqlmodel import Session, col, select, update
 
 from app.modules.downloads.model import ACTIVE_STATUSES, Download, DownloadStatus, utcnow
 
+logger = logging.getLogger(__name__)
+
 StopCheck = Callable[[], bool]
+
+MAX_CLIPS = 20
+MIN_CLIP_SECONDS = 0.5
+RENDER_FILENAME = "clip.mp4"
+
+
+@dataclass(frozen=True)
+class Clip:
+    start: float  # seconds into the source
+    end: float
+
+
+@dataclass(frozen=True)
+class Caption:
+    headline: str
+    details: str
+    hold: float = 6  # seconds fully visible from the start of the output
+    fade: float = 1.5  # seconds to fade out after that
+
+
+@dataclass(frozen=True)
+class RenderSpec:
+    clips: tuple[Clip, ...]  # in output order; may overlap
+    caption: Caption | None = None
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self))
+
+    @classmethod
+    def from_json(cls, raw: str) -> "RenderSpec":
+        data = json.loads(raw)
+        caption = data.get("caption")
+        return cls(
+            clips=tuple(Clip(**clip) for clip in data["clips"]),
+            caption=Caption(**caption) if caption else None,
+        )
+
+    @property
+    def total_seconds(self) -> float:
+        return sum(clip.end - clip.start for clip in self.clips)
 
 
 @dataclass(frozen=True)
@@ -39,6 +96,7 @@ class FetchedMedia:
     path: Path  # the downloaded file, somewhere inside dest_dir
     title: str | None = None
     content_type: str | None = None
+    poster: Path | None = None  # the video's own poster image, downloaded next to it
 
 
 class Downloader(Protocol):
@@ -46,6 +104,21 @@ class Downloader(Protocol):
         self, url: str, dest_dir: Path, format: str | None = None, should_stop: StopCheck | None = None
     ) -> FetchedMedia:
         """Fetch `url` into `dest_dir`. Raise on any failure, and abort (raise) once should_stop() is true."""
+        ...
+
+
+class Renderer(Protocol):
+    def render(self, source: Path, spec: RenderSpec, dest_dir: Path) -> FetchedMedia:
+        """
+        Cut spec.clips from `source`, join them, burn in the caption and write one MP4
+        into dest_dir. Raise RenderFailed with a short, user-facing message on failure.
+        """
+        ...
+
+
+class Thumbnailer(Protocol):
+    def make(self, video: Path, poster: Path | None, out_dir: Path) -> Path:
+        """Write a JPEG thumbnail into out_dir (from the poster, else a video frame) and return its path. Raise on failure."""
         ...
 
 
@@ -61,6 +134,10 @@ class Storage(Protocol):
         should_stop: StopCheck | None = None,
     ) -> None:
         """Raise on failure, and abort (raise) once should_stop() is true."""
+        ...
+
+    def download_file(self, key: str, local_path: Path, should_stop: StopCheck | None = None) -> None:
+        """Fetch `key` to local_path. Raise FileNotFoundError if it doesn't exist, anything else on other failures."""
         ...
 
     def verify_upload(self, key: str, expected_size: int, expected_sha256: str) -> bool: ...
@@ -82,6 +159,14 @@ class DownloadNotCancellable(Exception):
     """The download already finished (completed or failed), so there is nothing to cancel."""
 
 
+class InvalidRender(Exception):
+    """The render request can't be accepted; str(exc) says why, for the client."""
+
+
+class RenderFailed(Exception):
+    """A render job failed; str(exc) is the short message stored as the row's error."""
+
+
 class DownloadService:
     def __init__(
         self,
@@ -91,6 +176,9 @@ class DownloadService:
         tmp_dir: Path,
         upload_retries: int = 3,
         stop_check_interval: float = 1.0,
+        thumbnailer: Thumbnailer | None = None,
+        renderer: Renderer | None = None,
+        render_max_seconds: float = 600,
     ) -> None:
         self._session_factory = session_factory
         self._downloader = downloader
@@ -98,6 +186,9 @@ class DownloadService:
         self._tmp_dir = tmp_dir
         self._upload_retries = max(1, upload_retries)
         self._stop_check_interval = stop_check_interval  # seconds between DB reads in should_stop
+        self._thumbnailer = thumbnailer
+        self._renderer = renderer
+        self._render_max_seconds = render_max_seconds
 
     def create_download(self, client_id: str, url: str, format: str | None = None) -> Download:
         """Insert a queued row. Call process_download(download.id) afterwards."""
@@ -108,11 +199,42 @@ class DownloadService:
             session.refresh(download)
         return download
 
+    def create_render(self, client_id: str, source_key: str, spec: RenderSpec) -> Download:
+        """
+        Insert a queued render row. Call process_download(render.id) afterwards.
+        Raises InvalidRender if the source isn't one of this client's downloads or the
+        output would be longer than render_max_seconds. Clip bounds against the video's
+        actual length are only checked once the job has the file.
+        """
+        prefix = f"downloads/{client_id}/"
+        segments = source_key.removeprefix(prefix).split("/")
+        if not source_key.startswith(prefix) or any(part in ("", ".", "..") for part in segments):
+            raise InvalidRender(f"source_key must be a file under {prefix}")
+        if not spec.clips:
+            raise InvalidRender("at least one clip is required")
+        if spec.total_seconds > self._render_max_seconds:
+            raise InvalidRender(
+                f"clips add up to {spec.total_seconds:g}s; the limit is {self._render_max_seconds:g}s"
+            )
+        render = Download(client_id=client_id, source_url=source_key, render_spec=spec.to_json())
+        with self._session_factory() as session:
+            session.add(render)
+            session.commit()
+            session.refresh(render)
+        return render
+
     def get_download(self, client_id: str, download_id: uuid.UUID) -> Download:
-        """Scoped to client_id: another client's download counts as not found."""
+        """Scoped to client_id: another client's download, or a render, counts as not found."""
+        return self._get(client_id, download_id, render=False)
+
+    def get_render(self, client_id: str, render_id: uuid.UUID) -> Download:
+        """Like get_download, for renders. Raises DownloadNotFound."""
+        return self._get(client_id, render_id, render=True)
+
+    def _get(self, client_id: str, download_id: uuid.UUID, render: bool) -> Download:
         with self._session_factory() as session:
             download = session.get(Download, download_id)
-        if download is None or download.client_id != client_id:
+        if download is None or download.client_id != client_id or (download.render_spec is not None) != render:
             raise DownloadNotFound(download_id)
         return download
 
@@ -120,7 +242,7 @@ class DownloadService:
         """Newest first."""
         statement = (
             select(Download)
-            .where(Download.client_id == client_id)
+            .where(Download.client_id == client_id, col(Download.render_spec).is_(None))
             .order_by(col(Download.created_at).desc())
             .offset(offset)
             .limit(limit)
@@ -176,9 +298,14 @@ class DownloadService:
         """
         queued -> downloading -> uploading -> verifying -> completed | failed | cancelled.
 
+        The thumbnail is made and uploaded after the fetch, before the video upload, and
+        only recorded on the row together with `completed`. A failed or cancelled job
+        deletes it from B2 along with the video.
+
         Only a queued download is processed, so calling this twice is harmless.
         tmp/<id>/ is deleted after a verified upload, a failed fetch, or a cancel; it is
-        KEPT when the upload can't be verified, so the video isn't lost.
+        KEPT when the upload can't be verified, so the video isn't lost. A render's tmp
+        dir is always deleted: its source is still in B2, so it can simply be re-run.
         """
         with self._session_factory() as session:
             download = session.get(Download, download_id)
@@ -190,14 +317,14 @@ class DownloadService:
         if not self._set(download_id, only_if=(DownloadStatus.QUEUED,), status=DownloadStatus.DOWNLOADING):
             return  # not queued: already processed, or cancelled before it started
         try:
-            media = self._downloader.download(download.source_url, work_dir, download.format, should_stop)
+            media = self._fetch(download, work_dir, should_stop)
         except Exception as exc:
             shutil.rmtree(work_dir, ignore_errors=True)
-            self._set(download_id, status=DownloadStatus.FAILED, error=f"download failed: {exc}")
+            self._set(download_id, status=DownloadStatus.FAILED, error=_fetch_error(download, exc))
             return  # if it was cancelled, _set did nothing and the row stays cancelled
 
         sha256, size = _hash_file(media.path)
-        key = f"downloads/{download.client_id}/{download.id}/{media.path.name}"
+        key = _object_key(download, media.path.name)
         if not self._set(
             download_id,
             title=media.title,
@@ -209,6 +336,7 @@ class DownloadService:
             shutil.rmtree(work_dir, ignore_errors=True)
             return
 
+        thumbnail_key = self._upload_thumbnail(download, media, work_dir, should_stop)
         last_error = "upload could not be verified"
         for _ in range(self._upload_retries):
             if not self._set(download_id, status=DownloadStatus.UPLOADING):
@@ -227,6 +355,7 @@ class DownloadService:
                     status=DownloadStatus.COMPLETED,
                     b2_bucket=self._storage.bucket,
                     b2_key=key,
+                    thumbnail=thumbnail_key.rsplit("/", 1)[-1] if thumbnail_key else None,
                 ):
                     shutil.rmtree(work_dir, ignore_errors=True)
                     return
@@ -234,13 +363,59 @@ class DownloadService:
             last_error = "upload could not be verified"
 
         self._delete_object(key)
+        if thumbnail_key:
+            self._delete_object(thumbnail_key)
+        keep = download.render_spec is None  # a render can be re-run from its source in B2
+        error = f"{last_error} after {self._upload_retries} attempt(s)"
         if self._set(
             download_id,
             status=DownloadStatus.FAILED,
-            error=f"{last_error} after {self._upload_retries} attempt(s); file kept at {media.path}",
-        ):
+            error=f"{error}; file kept at {media.path}" if keep else error,
+        ) and keep:
             return
-        shutil.rmtree(work_dir, ignore_errors=True)  # cancelled: nothing worth keeping
+        shutil.rmtree(work_dir, ignore_errors=True)  # cancelled, or a render: nothing worth keeping
+
+    def _fetch(self, download: Download, work_dir: Path, should_stop: StopCheck) -> FetchedMedia:
+        """The `downloading` step: yt-dlp for a download; B2 source + renderer for a render."""
+        if download.render_spec is None:
+            return self._downloader.download(download.source_url, work_dir, download.format, should_stop)
+        if self._renderer is None:
+            raise RenderFailed("Rendering is not available on this server")
+        work_dir.mkdir(parents=True, exist_ok=True)
+        source = work_dir / f"source{_safe_suffix(download.source_url)}"
+        try:
+            self._storage.download_file(download.source_url, source, should_stop)
+        except FileNotFoundError:
+            raise RenderFailed("Source video not found") from None
+        except Exception as exc:
+            logger.warning("render %s: fetching %s failed: %s", download.id, download.source_url, exc)
+            raise RenderFailed("Could not fetch the source video") from exc
+        return self._renderer.render(source, RenderSpec.from_json(download.render_spec), work_dir)
+
+    def _upload_thumbnail(
+        self, download: Download, media: FetchedMedia, work_dir: Path, should_stop: StopCheck
+    ) -> str | None:
+        """
+        Make the thumbnail in a temp dir and upload it next to the video. Returns its B2
+        key, or None (after logging why) if anything went wrong. Never raises.
+        """
+        if self._thumbnailer is None:
+            return None
+        key = None
+        try:
+            with tempfile.TemporaryDirectory(dir=work_dir, prefix="thumbnail-") as out_dir:
+                path = self._thumbnailer.make(media.path, media.poster, Path(out_dir))
+                sha256, size = _hash_file(path)
+                key = _object_key(download, path.name)
+                self._storage.upload_file(path, key, sha256, "image/jpeg", should_stop)
+                if not self._storage.verify_upload(key, size, sha256):
+                    raise RuntimeError("upload could not be verified")
+            return key
+        except Exception as exc:
+            logger.warning("download %s: no thumbnail: %s", download.id, exc)
+            if key:
+                self._delete_object(key)
+            return None
 
     def _set(
         self,
@@ -288,6 +463,26 @@ class DownloadService:
             self._storage.delete_object(key)
         except Exception:
             pass  # the row is failed/cancelled either way; a stray object is harmless
+
+
+def _object_key(download: Download, filename: str) -> str:
+    prefix = "downloads" if download.render_spec is None else "renders"
+    return f"{prefix}/{download.client_id}/{download.id}/{filename}"
+
+
+def _fetch_error(download: Download, exc: Exception) -> str:
+    if download.render_spec is None:
+        return f"download failed: {exc}"
+    if isinstance(exc, RenderFailed):
+        return str(exc)
+    logger.exception("render %s failed unexpectedly", download.id, exc_info=exc)
+    return "Render failed unexpectedly"
+
+
+def _safe_suffix(key: str) -> str:
+    """The source's extension for its local copy ('.mp4'), or '' if it looks odd. ffmpeg probes the content anyway."""
+    suffix = PurePosixPath(key).suffix
+    return suffix if re.fullmatch(r"\.[A-Za-z0-9]{1,8}", suffix) else ""
 
 
 def _update(session: Session, download: Download, **fields: object) -> None:
