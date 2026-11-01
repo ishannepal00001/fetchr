@@ -12,6 +12,7 @@ dependencies = [
     "yt-dlp",             # media downloader (Facebook first)
     "boto3",              # Backblaze B2 via its S3-compatible API (app/core/storage.py)
     "alembic",            # DB migrations (Stage 5)
+    "pillow>=13.0.0",     # caption drawing; its wheels bundle libraqm for Devanagari shaping
 ]
 
 [dependency-groups]

@@ -192,7 +192,7 @@ def test_download_service_end_to_end_with_b2_storage(storage, s3, session_factor
 @pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="needs ffmpeg")
 def test_render_end_to_end_with_b2_storage_and_ffmpeg(storage, s3, session_factory, tmp_path):
     """A real source video in B2 (moto), the real ffmpeg renderer and thumbnailer, through DownloadService."""
-    from app.core.captions import FfmpegCaptioner
+    from app.core.captions import PillowCaptioner
     from app.core.renderer import FfmpegRenderer
     from app.core.thumbnails import FfmpegThumbnailer
     from app.modules.downloads.model import DownloadStatus
@@ -212,7 +212,7 @@ def test_render_end_to_end_with_b2_storage_and_ffmpeg(storage, s3, session_facto
         storage,
         tmp_path / "tmp",
         thumbnailer=FfmpegThumbnailer(),
-        renderer=FfmpegRenderer(FfmpegCaptioner()),
+        renderer=FfmpegRenderer(PillowCaptioner()),
     )
     spec = RenderSpec(clips=(Clip(2, 3), Clip(0, 1)), caption=Caption("Headline", "Details"))
     created = service.create_render("alice", source_key, spec)

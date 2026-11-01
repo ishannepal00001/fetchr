@@ -47,7 +47,6 @@ def test_defaults(env):
     assert (settings.ffmpeg_path, settings.ffprobe_path) == ("ffmpeg", "ffprobe")
     assert settings.render_max_seconds == 600
     assert settings.render_timeout_seconds == 1800
-    assert (settings.caption_font, settings.caption_bold_font) == ("Sans", "Sans:bold")
 
 
 def test_reads_ffmpeg_and_render_variables(env):
