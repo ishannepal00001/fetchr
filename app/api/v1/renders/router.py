@@ -28,7 +28,7 @@ def _response(render: Download, code: str) -> DownloadResponse:
     "",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=DownloadResponse,
-    responses={422: {"description": "Invalid body, a source_key outside your downloads, or clips too long in total"}},
+    responses={422: {"description": "Invalid body, a source_key outside your downloads and uploads, or clips too long in total"}},
 )
 def create_render(
     body: RenderCreate,

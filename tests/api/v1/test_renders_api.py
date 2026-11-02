@@ -263,7 +263,7 @@ def test_source_outside_your_downloads_is_422_with_a_message(alice, source_key):
     response = alice.post("/api/v1/renders", json=body(source_key=source_key))
 
     assert response.status_code == 422
-    assert response.json() == {"detail": "source_key must be a file under downloads/alice/"}
+    assert response.json() == {"detail": "source_key must be a file under downloads/alice/ or uploads/alice/"}
     assert NEXT_CODE_HEADER in response.headers
 
 

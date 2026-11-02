@@ -58,7 +58,7 @@ Either way the output is a JPEG scaled to 640px wide keeping the aspect ratio (`
 **A thumbnail never fails a download.** Any error (no poster and an unreadable video, ffmpeg error, upload error) is logged as a warning, any partial thumbnail object is deleted, and the download completes with `thumbnail: null`.
 
 ### Renders
-A render takes one video the client already downloaded (in B2 under `downloads/<client_id>/…`), cuts clips from it, joins them in the requested order into **one MP4**, optionally burns a caption into it, and uploads the result to `renders/<client_id>/<id>/clip.mp4`.
+A render takes one video the client already has in B2: one it downloaded (under `downloads/<client_id>/…`) or one it uploaded there itself (under `uploads/<client_id>/…`). It cuts clips from it, joins them in the requested order into **one MP4**, optionally burns a caption into it, and uploads the result to `renders/<client_id>/<id>/clip.mp4`.
 
 A render is a download row with a render spec attached, so it runs through the same job: the same `BackgroundTasks` worker, the same statuses, thumbnail, upload, verify and retry steps, and the same handling of jobs cut off by a restart (marked `failed`). Only the `downloading` step differs: instead of yt-dlp, it fetches the source from B2 into `tmp/<id>/` and renders it there. Renders and downloads never show up in each other's endpoints.
 
@@ -214,7 +214,7 @@ A download row is both the job and its result, so its fields fill in at differen
 
 | Field | Type | Notes |
 |---|---|---|
-| `source_key` | string, required | B2 key of one of **your** downloads: must start with `downloads/<your client id>/` (no `.`, `..` or empty path segments) |
+| `source_key` | string, required | B2 key of one of **your** downloads, or of a file you uploaded to B2 yourself: must start with `downloads/<your client id>/` or `uploads/<your client id>/` (no `.`, `..` or empty path segments) |
 | `clips` | list, 1–20 items | in output order. Clips may overlap |
 | `clips[].start` | number | seconds into the source, ≥ 0 |
 | `clips[].end` | number | seconds into the source, at least 0.5 after `start`, and at most 0.1s past the source's end (checked once the job has the file) |
@@ -281,7 +281,7 @@ With `?redirect=true` you get a `307` to that URL instead, with no body.
 | `409` | `{"detail": "download not completed yet"}` | `/file` asked for a download that isn't `completed` |
 | `409` | `{"detail": "download already finished"}` | `/cancel` on a download that is `completed` or `failed` |
 | `422` | FastAPI's `{"detail": [ … ]}` | invalid body, query parameter, or id (not a UUID) |
-| `422` | `{"detail": "<message>"}` | a render whose `source_key` isn't one of your downloads, or whose clips add up to more than `FETCHR_RENDER_MAX_SECONDS` |
+| `422` | `{"detail": "<message>"}` | a render whose `source_key` isn't one of your downloads or uploads, or whose clips add up to more than `FETCHR_RENDER_MAX_SECONDS` |
 | `500` | `{"detail": "internal server error"}` | an unexpected failure (e.g. the database or disk). Still carries `X-Fetchr-Next-Code` |
 
 ---
