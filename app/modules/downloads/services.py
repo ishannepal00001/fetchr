@@ -53,6 +53,7 @@ StopCheck = Callable[[], bool]
 MAX_CLIPS = 20
 MIN_CLIP_SECONDS = 0.5
 RENDER_FILENAME = "clip.mp4"
+SOURCE_ROOTS = ("downloads", "uploads")  # a render's source is one of the client's downloads, or a file it uploaded
 
 
 @dataclass(frozen=True)
@@ -202,14 +203,16 @@ class DownloadService:
     def create_render(self, client_id: str, source_key: str, spec: RenderSpec) -> Download:
         """
         Insert a queued render row. Call process_download(render.id) afterwards.
-        Raises InvalidRender if the source isn't one of this client's downloads or the
+        Raises InvalidRender if the source isn't a file under one of this client's
+        SOURCE_ROOTS (its downloads, or files it uploaded to B2 itself) or the
         output would be longer than render_max_seconds. Clip bounds against the video's
         actual length are only checked once the job has the file.
         """
-        prefix = f"downloads/{client_id}/"
-        segments = source_key.removeprefix(prefix).split("/")
-        if not source_key.startswith(prefix) or any(part in ("", ".", "..") for part in segments):
-            raise InvalidRender(f"source_key must be a file under {prefix}")
+        prefixes = [f"{root}/{client_id}/" for root in SOURCE_ROOTS]
+        prefix = next((p for p in prefixes if source_key.startswith(p)), None)
+        segments = source_key.removeprefix(prefix or "").split("/")
+        if prefix is None or any(part in ("", ".", "..") for part in segments):
+            raise InvalidRender(f"source_key must be a file under {' or '.join(prefixes)}")
         if not spec.clips:
             raise InvalidRender("at least one clip is required")
         if spec.total_seconds > self._render_max_seconds:

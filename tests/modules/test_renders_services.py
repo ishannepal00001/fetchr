@@ -103,17 +103,28 @@ def make_service(session_factory, tmp_path, storage=None, renderer=None, thumbna
         "downloads/alice",  # no file under the prefix
         "downloads/alice/",
         "downloads/alicex/0b9d/123.mp4",  # prefix of another client id
-        "renders/alice/0b9d/clip.mp4",  # only downloads can be rendered
+        "renders/alice/0b9d/clip.mp4",  # only downloads and uploads can be rendered
+        "uploads/bob/0b9d/video.mp4",  # another client's upload
+        "uploads/alice/",
+        "uploads/alice/../bob/x.mp4",
         "downloads/alice/../bob/0b9d/123.mp4",
         "downloads/alice/0b9d//123.mp4",
         "/downloads/alice/0b9d/123.mp4",
     ],
 )
-def test_source_key_must_be_one_of_this_clients_downloads(session_factory, tmp_path, key):
+def test_source_key_must_be_one_of_this_clients_downloads_or_uploads(session_factory, tmp_path, key):
     service = make_service(session_factory, tmp_path)
 
-    with pytest.raises(InvalidRender, match="downloads/alice/"):
+    with pytest.raises(InvalidRender, match="downloads/alice/ or uploads/alice/"):
         service.create_render("alice", key, SPEC)
+
+
+def test_an_uploaded_file_can_be_the_source(session_factory, tmp_path):
+    service = make_service(session_factory, tmp_path)
+
+    render = service.create_render("alice", "uploads/alice/7f3a/my video.mp4", SPEC)
+
+    assert render.source_url == "uploads/alice/7f3a/my video.mp4"
 
 
 def test_total_length_is_limited(session_factory, tmp_path):

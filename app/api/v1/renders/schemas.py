@@ -39,7 +39,7 @@ class CaptionIn(BaseModel):
 
 class RenderCreate(BaseModel):
     source_key: str = Field(
-        min_length=1, max_length=1024, description="B2 key of the source: downloads/<client_id>/<download_id>/<filename>"
+        min_length=1, max_length=1024, description="B2 key of the source: downloads/<client_id>/<download_id>/<filename> or uploads/<client_id>/…"
     )
     clips: list[ClipIn] = Field(min_length=1, max_length=MAX_CLIPS, description="in output order; may overlap")
     caption: CaptionIn | None = None
