@@ -40,7 +40,8 @@ class Settings(BaseSettings):
 
     # --- Renders ---
     render_max_seconds: float = Field(default=600, gt=0)  # total output length a render may ask for
-    render_timeout_seconds: int = Field(default=1800, gt=0)  # one ffmpeg render run, then it is killed
+    render_timeout_seconds: int = Field(default=1800, gt=0)  # a whole render (all its ffmpeg runs), then it is killed
+    render_threads: int = Field(default=1, ge=1)  # ffmpeg threads per render run; more is faster but needs more memory
 
     # --- Backblaze B2 (no FETCHR_ prefix, matching .env.example) ---
     b2_endpoint_url: str = Field(validation_alias=AliasChoices("B2_ENDPOINT_URL", "b2_endpoint_url"))

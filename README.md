@@ -65,16 +65,17 @@ A render is a download row with a render spec attached, so it runs through the s
 1. **Fetch** `source_key` from B2 into `tmp/<id>/` (status `downloading`).
 2. **ffprobe** it for the duration, display size (rotation metadata applied), and whether it has audio. Any clip ending more than 0.1s after the video's end fails the job with `Clip ends after the video does`.
 3. **Caption** (if any): drawn with Pillow as a transparent PNG as wide as the video, matching Bhandar's editor preview. A full-width panel (black at 60%) holds the headline in Montserrat ExtraBold, navy on a gold bar per wrapped line (each bar as wide as its line, with a soft shadow), and below it the details in Montserrat Bold, cream with a soft shadow, line breaks kept. Everything is centred, and every size is a fraction of the video width. Nepali is drawn in Noto Sans Devanagari and shaped with libraqm, so conjuncts and vowel signs join correctly, and mixed Latin and Nepali lines switch font per run. The text is never cut: if the caption would cover more than half the frame, everything shrinks together until it fits.
-4. **One ffmpeg run**, re-encoded so every cut is frame accurate (no stream copy):
-   - each clip is read as its own input (`-ss`/`-t`, so ffmpeg seeks instead of decoding from the start), then `trim`/`atrim` + `setpts`/`asetpts=PTS-STARTPTS`
-   - a source without audio gets silence (`anullsrc`) per clip, so the output always has an audio track
-   - `concat` in request order; odd dimensions are cropped down to even
-   - the caption is overlaid at the bottom (`overlay=0:H-h`) from the **start of the output** (not each clip), fully visible for `hold` seconds, then its alpha fades out over `fade` seconds
-   - `libx264 -preset veryfast -crf 20 -pix_fmt yuv420p`, AAC 160k, `-movflags +faststart`, at the source's resolution
-5. **Thumbnail**: the output's first frame, as `thumbnail.jpg` (640px wide, best effort as for downloads).
-6. **Upload + verify** both, as for downloads, then `completed`.
+4. **One ffmpeg run per clip**, re-encoded so every cut is frame accurate (no stream copy), into `part-NN.mkv`. Rendering a clip at a time keeps memory flat however many clips there are: about 280 MB at 1080p with a caption, so a render fits a 512 MB instance next to the app.
+   - the clip is read with `-ss`/`-t` (ffmpeg seeks instead of decoding from the start), then `trim`/`atrim` + `setpts`/`asetpts=PTS-STARTPTS`
+   - a source without audio gets silence (`anullsrc`), so every part has an audio track
+   - odd dimensions are cropped down to even
+   - the caption is overlaid at the bottom (`overlay=0:H-h`) on the **output's clock** (not each clip's): fully visible for `hold` seconds from its start, then its alpha fades out over `fade` seconds. A clip starting partway into that window picks the caption up where the previous clip left it, and later clips get none. The PNG is read once and repeated inside the filter graph
+   - `libx264 -preset veryfast -crf 20 -pix_fmt yuv420p` at the source's resolution, with `FETCHR_RENDER_THREADS` threads (default 1: in a container ffmpeg sees the host's cores, not the container's, and sizes its buffers to match). Audio stays PCM in the parts
+5. **Join**: the concat demuxer copies the parts' video as is and encodes the audio once to AAC 160k, with `-movflags +faststart`, into `clip.mp4`. Encoding AAC once avoids encoder priming at every cut. The parts are then deleted.
+6. **Thumbnail**: the output's first frame, as `thumbnail.jpg` (640px wide, best effort as for downloads).
+7. **Upload + verify** both, as for downloads, then `completed`.
 
-`tmp/<id>/` is deleted whatever the outcome (unlike a download, the source is still in B2, so nothing is lost). On failure, `error` is a short message such as `Clip ends after the video does`, `Source video not found`, `The source isn't a readable video` or `ffmpeg could not render the video`. The ffmpeg command and the tail of its stderr go to the log. A single ffmpeg run is killed after `FETCHR_RENDER_TIMEOUT_SECONDS`.
+`tmp/<id>/` is deleted whatever the outcome (unlike a download, the source is still in B2, so nothing is lost). On failure, `error` is a short message such as `Clip ends after the video does`, `Source video not found`, `The source isn't a readable video` or `ffmpeg could not render the video`. The ffmpeg command and the tail of its stderr go to the log. A render is killed once all its ffmpeg runs together take longer than `FETCHR_RENDER_TIMEOUT_SECONDS`.
 
 ---
 
@@ -293,7 +294,8 @@ Copy `.env.example` to `.env` and fill it in. Key values:
 - `FETCHR_COOKIES_FILE`: optional, for Facebook videos that need login.
 - `FETCHR_FFMPEG_PATH`, `FETCHR_FFPROBE_PATH`: the ffmpeg binaries, used for thumbnails and renders (default `ffmpeg` / `ffprobe` on the `PATH`).
 - `FETCHR_RENDER_MAX_SECONDS`: the most output a render may ask for, as the sum of its clip lengths (default `600`).
-- `FETCHR_RENDER_TIMEOUT_SECONDS`: a single ffmpeg render is killed after this long (default `1800`).
+- `FETCHR_RENDER_TIMEOUT_SECONDS`: a render, all its ffmpeg runs together, is killed after this long (default `1800`).
+- `FETCHR_RENDER_THREADS`: ffmpeg threads per render run (default `1`). 1 keeps a 1080p render near 280 MB; more is faster but needs more memory.
 
 ## Running
 Runs in Docker; the image includes **ffmpeg**, which yt-dlp uses to merge Facebook's separate video and audio streams and renders use to cut and join. Caption fonts ship in `app/core/fonts`, and Pillow's wheel bundles libraqm for text shaping; fetchr refuses to start if raqm is missing.

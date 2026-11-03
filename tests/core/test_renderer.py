@@ -220,7 +220,7 @@ def test_ffmpeg_failure_logs_the_command_and_stderr_tail(renderer, tmp_path, out
         renderer.render(silent, spec((0, 1)), out_dir)  # [0:a:0] matches no stream
 
     command, *stderr = caplog.records[-1].getMessage().split("\n")
-    assert "-filter_complex" in command and "concat=n=1" in command
+    assert "-filter_complex" in command and "[0:a:0]atrim" in command
     assert any(line.strip() for line in stderr)  # ffmpeg's own error follows the command
 
 
@@ -239,25 +239,64 @@ def test_ffmpeg_and_ffprobe_paths_are_configurable(source, out_dir):
     with pytest.raises(RenderFailed):
         renderer.render(source, spec((0, 1)), out_dir)
 
-    command = renderer.command(source, spec((0, 1)), Probe(6, 160, 120, True), None, out_dir / "clip.mp4")
+    command = renderer.clip_command(source, Clip(0, 1), Probe(6, 160, 120, True), None, None, 0, out_dir / "part.mkv")
     assert command[0] == "/nonexistent/ffmpeg"
+    assert renderer.join_command(out_dir / "parts.txt", out_dir / "clip.mp4")[0] == "/nonexistent/ffmpeg"
 
 
-def test_command_shape():
-    renderer = FfmpegRenderer(PillowCaptioner())
+def test_caption_carries_over_into_the_next_clip(renderer, source, out_dir):
+    caption = Caption(headline="Headline", details="Details", hold=1.5, fade=0.2)
+
+    media = renderer.render(source, spec((0, 1), (0, 1.5)), out_dir)  # no caption: reference
+    plain = color_at(media.path, 2.2, y=0.95)
+    media = renderer.render(source, spec((0, 1), (0, 1.5), caption=caption), out_dir)
+
+    assert not near(color_at(media.path, 1.2, y=0.95), RED)  # second clip, 1.2s into the output: still shown
+    assert color_at(media.path, 2.2, y=0.95) == pytest.approx(plain, abs=10)  # past hold + fade: gone
+
+
+def test_parts_are_deleted_after_the_join(renderer, source, out_dir):
+    renderer.render(source, spec((0, 1), (2, 3), (4, 5)), out_dir)
+
+    assert sorted(path.name for path in out_dir.iterdir()) == ["clip.mp4", "first-frame.png"]
+
+
+def test_timeout_covers_the_whole_render(source, out_dir, monkeypatch):
+    renderer = FfmpegRenderer(PillowCaptioner(), timeout=5)
+    clock = iter([0, 0, 3, 6])  # the deadline, then before each run: 2nd clip starts at 3s, the join at 6s
+    monkeypatch.setattr("app.core.renderer.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr(renderer, "probe", lambda source: Probe(6, 160, 120, True))
+
+    with pytest.raises(RenderFailed, match="^ffmpeg took longer than 5s$"):
+        renderer.render(source, spec((0, 1), (2, 3)), out_dir)
+
+
+def test_clip_command_shape():
+    renderer = FfmpegRenderer(PillowCaptioner(), threads=2)
     caption = Caption("Headline", "Details", hold=6, fade=1.5)
-    command = renderer.command(
-        Path("src.mp4"), spec((12.4, 31), (1, 2.5), caption=caption), Probe(60, 1280, 720, False), Path("cap.png"), Path("out.mp4")
-    )
+    probe = Probe(60, 1280, 720, False)
+
+    command = renderer.clip_command(Path("src.mp4"), Clip(12.4, 31), probe, caption, Path("cap.png"), 2.5, Path("p.mkv"))
     joined = " ".join(command)
     graph = command[command.index("-filter_complex") + 1]
 
-    assert "-ss 12.400 -t 18.600 -i src.mp4 -ss 1.000 -t 1.500 -i src.mp4" in joined
-    assert "-loop 1 -t 7.500 -i cap.png" in joined
-    assert "[0:v:0]trim=duration=18.600,setpts=PTS-STARTPTS[v0]" in graph
-    assert graph.count("anullsrc") == 2  # no audio in the source
-    assert "[v0][a0][v1][a1]concat=n=2:v=1:a=1" in graph
-    assert "format=rgba,fade=t=out:st=6.000:d=1.500:alpha=1" in graph
+    assert "-threads 2 -ss 12.400 -t 18.600 -i src.mp4" in joined
+    assert "-i src.mp4 -i cap.png" in joined
+    assert "[0:v:0]trim=duration=18.600,setpts=PTS-STARTPTS[v]" in graph
+    assert "anullsrc" in graph  # no audio in the source
+    assert (
+        "[1:v]format=rgba,loop=loop=-1:size=1,fps=30,trim=duration=7.500,fade=t=out:st=6.000:d=1.500:alpha=1,"
+        "trim=start=2.500,setpts=PTS-STARTPTS[caption]"
+    ) in graph
     assert "overlay=0:H-h:eof_action=pass" in graph
     assert "crop" not in graph  # already even
-    assert "-c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -c:a aac -b:a 160k -movflags +faststart out.mp4" in joined
+    assert "-c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -threads 2 -c:a pcm_s16le -ar 48000 -ac 2 p.mkv" in joined
+
+    later = renderer.clip_command(Path("src.mp4"), Clip(1, 2), probe, caption, Path("cap.png"), 7.5, Path("p.mkv"))
+    assert "cap.png" not in later and "overlay" not in " ".join(later)  # starts after hold + fade
+
+
+def test_join_command_shape():
+    command = " ".join(FfmpegRenderer(PillowCaptioner()).join_command(Path("parts.txt"), Path("out.mp4")))
+
+    assert "-f concat -safe 0 -i parts.txt -c:v copy -c:a aac -b:a 160k -movflags +faststart out.mp4" in command

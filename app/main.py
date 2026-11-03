@@ -49,6 +49,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ffmpeg=settings.ffmpeg_path,
             ffprobe=settings.ffprobe_path,
             timeout=settings.render_timeout_seconds,
+            threads=settings.render_threads,
         ),
         render_max_seconds=settings.render_max_seconds,
     )

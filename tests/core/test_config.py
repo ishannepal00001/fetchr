@@ -47,6 +47,7 @@ def test_defaults(env):
     assert (settings.ffmpeg_path, settings.ffprobe_path) == ("ffmpeg", "ffprobe")
     assert settings.render_max_seconds == 600
     assert settings.render_timeout_seconds == 1800
+    assert settings.render_threads == 1
 
 
 def test_reads_ffmpeg_and_render_variables(env):
@@ -54,6 +55,7 @@ def test_reads_ffmpeg_and_render_variables(env):
     env.setenv("FETCHR_FFPROBE_PATH", "/opt/ffmpeg/bin/ffprobe")
     env.setenv("FETCHR_RENDER_MAX_SECONDS", "120.5")
     env.setenv("FETCHR_RENDER_TIMEOUT_SECONDS", "300")
+    env.setenv("FETCHR_RENDER_THREADS", "4")
 
     settings = Settings(_env_file=None)
 
@@ -61,6 +63,7 @@ def test_reads_ffmpeg_and_render_variables(env):
     assert settings.ffprobe_path == "/opt/ffmpeg/bin/ffprobe"
     assert settings.render_max_seconds == 120.5
     assert settings.render_timeout_seconds == 300
+    assert settings.render_threads == 4
 
     env.setenv("FETCHR_RENDER_MAX_SECONDS", "0")
     with pytest.raises(ValidationError, match="render_max_seconds"):
