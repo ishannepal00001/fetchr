@@ -7,7 +7,7 @@ import pytest
 from yt_dlp.utils import DownloadError
 
 from app.core import downloader as downloader_module
-from app.core.downloader import DEFAULT_FORMAT, DownloaderError, DownloadStopped, YtDlpDownloader
+from app.core.downloader import COOKIES_COPY, DEFAULT_FORMAT, DownloaderError, DownloadStopped, YtDlpDownloader
 
 
 class FakeYoutubeDL:
@@ -72,12 +72,18 @@ def test_options_default_format_and_no_cookies(fake_ydl, tmp_path):
 
 
 def test_options_custom_format_and_cookies(fake_ydl, tmp_path):
-    cookies = tmp_path / "cookies.txt"
+    cookies = tmp_path / "secrets" / "fb-cookies.txt"
+    cookies.parent.mkdir()
+    cookies.write_text("# Netscape HTTP Cookie File\n")
+    dest = tmp_path / "job"
 
-    YtDlpDownloader(cookies_file=cookies).download("https://facebook.com/watch?v=123", tmp_path, format="b")
+    YtDlpDownloader(cookies_file=cookies).download("https://facebook.com/watch?v=123", dest, format="b")
 
+    # yt-dlp gets a writable copy in the job dir, never the (possibly read-only) original.
+    copy = dest / COOKIES_COPY
     assert fake_ydl.last_opts["format"] == "b"
-    assert fake_ydl.last_opts["cookiefile"] == str(cookies)
+    assert fake_ydl.last_opts["cookiefile"] == str(copy)
+    assert copy.read_text() == cookies.read_text()
 
 
 def test_falls_back_to_prepare_filename(fake_ydl, monkeypatch, tmp_path):

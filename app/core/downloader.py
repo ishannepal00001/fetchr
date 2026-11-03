@@ -8,9 +8,14 @@ which needs ffmpeg on the PATH.
 yt-dlp also saves the video's poster image next to it (writethumbnail). A poster that
 can't be fetched is only a yt-dlp warning, never a failed download; FetchedMedia.poster
 is then None. The poster's remote URL is never passed on.
+
+yt-dlp writes the cookie jar back to its cookie file after every run, and the configured
+file may be read-only (a Render secret file in /etc/secrets), so each download gets its own
+copy in dest_dir (COOKIES_COPY) and the original is never written.
 """
 
 import mimetypes
+import shutil
 from pathlib import Path
 
 from yt_dlp import YoutubeDL
@@ -19,6 +24,7 @@ from yt_dlp.utils import DownloadCancelled, DownloadError
 from app.modules.downloads.services import FetchedMedia, StopCheck
 
 DEFAULT_FORMAT = "bv*+ba/b"  # best video + best audio, else best single file
+COOKIES_COPY = "cookies.txt"
 
 
 class DownloaderError(Exception):
@@ -78,7 +84,9 @@ class YtDlpDownloader:
             "fragment_retries": 3,
         }
         if self._cookies_file:
-            opts["cookiefile"] = str(self._cookies_file)
+            cookies = dest_dir / COOKIES_COPY
+            shutil.copyfile(self._cookies_file, cookies)
+            opts["cookiefile"] = str(cookies)
         if should_stop:
             # yt-dlp calls progress hooks on every chunk; raising DownloadCancelled aborts the download.
             # (The ffmpeg merge at the end doesn't report progress, so it can't be stopped mid-way.)
